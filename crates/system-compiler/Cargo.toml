@@ -1,0 +1,21 @@
+[package]
+name = "system-compiler"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+description = "Compiles a planetary system into 3GIX matter: a frame registry and per-body density fields."
+
+[lib]
+name = "system_compiler"
+path = "src/lib.rs"
+
+[[bin]]
+name = "system-compiler"
+path = "src/main.rs"
+
+[dependencies]
+gx-core = { git = "https://github.com/benjaminfkile/3gix-core", branch = "grunt" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+anyhow = "1"
+thiserror = "2"

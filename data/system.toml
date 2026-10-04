@@ -1,0 +1,400 @@
+# The planetary system this compiler bakes into matter.
+#
+# This is the only place numbers live. Every value is SI (meters, kilograms,
+# seconds, kelvin) except the IAU rotational elements, which keep the IAU
+# report's degrees and degrees per day and are converted to radians and
+# radians per second in code (crates/system-compiler/src/rotation.rs).
+# Every source, request, and conversion is recorded in docs/data-sources.md.
+#
+# Conventions:
+# - Masses are GM / G with G = 6.67430e-11 m^3 kg^-1 s^-2 (CODATA 2018, the
+#   value gx_core::gravity::G uses). GM values are from the NAIF kernel
+#   gm_de440.tpc (DE440 values), quoted in km^3/s^2 on each body.
+# - State vectors are JPL Horizons geometric states at 2000-01-01 12:00:00 TDB
+#   (JD 2451545.0 TDB), ICRF axes, km and km/s multiplied by 1000. The Sun
+#   and the planets are relative to the system barycenter (@0, the root
+#   frame); the Moon is relative to the Earth's center (@399).
+# - Rotational elements are the IAU WGCCRE values from the NAIF kernel
+#   pck00011.tpc, evaluated at J2000 (d = 0, T = 0) with every periodic term
+#   included (scripts/iau-at-epoch.py).
+# - sidereal_orbit_period_s is a published check value, never compiled: the
+#   tests compare it with the period derived from the state vectors.
+# - root_extent_m is 8 * mean_radius_m for every body frame; max_depth is 6.
+
+[epoch]
+# Seconds of Barycentric Dynamical Time since J2000 (2000-01-01 12:00:00 TDB).
+tdb_seconds_since_j2000 = 0.0
+
+[root]
+# The system barycenter: a massless coordinate origin (Horizons center @0).
+frame_id = 0
+name = "Solar system barycenter"
+# Massless: the barycenter is a point, not a body.
+mass_kg = 0.0
+# A cube of edge 2.0e13 m centered on the barycenter: half edge 1.0e13 m is
+# more than twice the Neptune aphelion distance (about 4.54e12 m).
+root_extent_m = 2.0e13
+# No matter is compiled in the root frame itself.
+max_depth = 0
+
+
+[[body]]
+frame_id = 1
+# The system barycenter (root).
+parent_frame_id = 0
+# Compiler-side only; never emitted.
+name = "Sun"
+# BODY10_GM = 1.3271244004127942E+11 km^3/s^2 (NAIF gm_de440.tpc); GM * 1e9 / 6.67430e-11.
+mass_kg = 1.988409871316534e30
+# Horizons physical data for target 10: 'Vol. mean radius, km = 695700' (IAU 2015 nominal solar radius).
+mean_radius_m = 6.957e8
+# Horizons COMMAND='10' CENTER='@0', X Y Z in km times 1000.
+position_m = [-1.067706805380953e9, -3.960361847959462e8, -1.380651842868809e8]
+# Horizons COMMAND='10' CENTER='@0', VX VY VZ in km/s times 1000.
+velocity_m_per_s = [9.312571926520472e0, -1.170150612817771e1, -5.251266205200356e0]
+# Pole and prime meridian: IAU WGCCRE 2015 report, as BODY10_POLE_RA,
+# BODY10_POLE_DEC, and BODY10_PM in pck00011.tpc, evaluated at J2000.
+pole_ra_deg = 286.13
+pole_dec_deg = 63.87
+prime_meridian_deg = 84.176
+rotation_rate_deg_per_day = 14.1844
+state = "plasma"
+# Horizons physical data for target 10: 'Effective temp, K = 5772'.
+temperature_k = 5772.0
+# Bands long to short wavelength. Tint: a hot emitter: albedo 0 in every band, so emissivity is 1 and it radiates as a blackbody.
+albedo = [0.0, 0.0, 0.0]
+roughness = 1.0
+# Chosen so attenuation * mean density * 0.01 * mean radius >= 10: opaque
+# within one percent of the radius (asserted in tests/data.rs).
+attenuation_m2_per_kg = 1e-08
+# 8 * mean_radius_m.
+root_extent_m = 5.5656e9
+max_depth = 6
+
+[[body]]
+frame_id = 2
+# The system barycenter (root).
+parent_frame_id = 0
+# Compiler-side only; never emitted.
+name = "Mercury"
+# BODY199_GM = 2.2031868551400003E+04 km^3/s^2 (NAIF gm_de440.tpc); GM * 1e9 / 6.67430e-11.
+mass_kg = 3.301000636980658e23
+# Horizons physical data for target 199: 'Vol. Mean Radius (km) = 2439.4+-0.1'.
+mean_radius_m = 2.4394e6
+# Horizons COMMAND='199' CENTER='@0', X Y Z in km times 1000.
+position_m = [-2.052943316123468e10, -6.032400395827633e10, -3.01308378641183e10]
+# Horizons COMMAND='199' CENTER='@0', VX VY VZ in km/s times 1000.
+velocity_m_per_s = [3.700430442920571e4, -8.541376789510446e3, -8.398372409672424e3]
+# Horizons physical data for target 199: 'Sidereal orb. per. = 87.969257 d'; days times 86400.
+sidereal_orbit_period_s = 7.6005438048e6
+# Pole and prime meridian: IAU WGCCRE 2015 report, as BODY199_POLE_RA,
+# BODY199_POLE_DEC, and BODY199_PM in pck00011.tpc, evaluated at J2000.
+pole_ra_deg = 281.0103
+pole_dec_deg = 61.4155
+prime_meridian_deg = 329.599948805
+rotation_rate_deg_per_day = 6.1385108
+state = "solid"
+# NASA NSSDCA Mercury fact sheet: 'Black-body temperature (K) 439.6'.
+temperature_k = 439.6
+# Bands long to short wavelength (600 to 700 nm, 500 to 600 nm, 400 to
+# 500 nm). Mean of the three is the geometric albedo 0.142 (NASA NSSDCA Mercury fact sheet: 'Geometric albedo 0.142');
+# tint: grey regolith, slightly brighter toward the red.
+albedo = [0.16, 0.14, 0.126]
+roughness = 0.9
+# Solid: a hard surface, no volumetric extinction.
+attenuation_m2_per_kg = 0.0
+# 8 * mean_radius_m.
+root_extent_m = 1.95152e7
+max_depth = 6
+
+[[body]]
+frame_id = 3
+# The system barycenter (root).
+parent_frame_id = 0
+# Compiler-side only; never emitted.
+name = "Venus"
+# BODY299_GM = 3.2485859200000000E+05 km^3/s^2 (NAIF gm_de440.tpc); GM * 1e9 / 6.67430e-11.
+mass_kg = 4.867305814842006e24
+# Horizons physical data for target 299: 'Vol. Mean Radius (km) = 6051.84+-0.01'.
+mean_radius_m = 6.05184e6
+# Horizons COMMAND='299' CENTER='@0', X Y Z in km times 1000.
+position_m = [-1.085242008575715e11, -7.3185649596786e9, 3.548121861333776e9]
+# Horizons COMMAND='299' CENTER='@0', VX VY VZ in km/s times 1000.
+velocity_m_per_s = [1.391218601189967e3, -3.202951993781091e4, -1.44970867394732e4]
+# Horizons physical data for target 299: 'Sidereal orb. per., d = 224.70079922'; days times 86400.
+sidereal_orbit_period_s = 1.9414149052608e7
+# Pole and prime meridian: IAU WGCCRE 2015 report, as BODY299_POLE_RA,
+# BODY299_POLE_DEC, and BODY299_PM in pck00011.tpc, evaluated at J2000.
+pole_ra_deg = 272.76
+pole_dec_deg = 67.16
+prime_meridian_deg = 160.2
+rotation_rate_deg_per_day = -1.4813688
+state = "solid"
+# NASA NSSDCA Venus fact sheet: 'Black-body temperature (K) 226.6'.
+temperature_k = 226.6
+# Bands long to short wavelength (600 to 700 nm, 500 to 600 nm, 400 to
+# 500 nm). Mean of the three is the geometric albedo 0.689 (NASA NSSDCA Venus fact sheet: 'Geometric albedo 0.689');
+# tint: pale yellow cloud deck, darker in the blue band.
+albedo = [0.72, 0.7, 0.647]
+roughness = 0.5
+# Solid: a hard surface, no volumetric extinction.
+attenuation_m2_per_kg = 0.0
+# 8 * mean_radius_m.
+root_extent_m = 4.841472e7
+max_depth = 6
+
+[[body]]
+frame_id = 4
+# The system barycenter (root).
+parent_frame_id = 0
+# Compiler-side only; never emitted.
+name = "Earth"
+# BODY399_GM = 3.9860043550702266E+05 km^3/s^2 (NAIF gm_de440.tpc); GM * 1e9 / 6.67430e-11.
+mass_kg = 5.972168399787584e24
+# Horizons physical data for target 399: 'Vol. Mean Radius (km) = 6371.01+-0.02'.
+mean_radius_m = 6.37101e6
+# Horizons COMMAND='399' CENTER='@0', X Y Z in km times 1000.
+position_m = [-2.756674048281145e10, 1.323613811535491e11, 5.741865328625385e10]
+# Horizons COMMAND='399' CENTER='@0', VX VY VZ in km/s times 1000.
+velocity_m_per_s = [-2.978494749851088e4, -5.029753814928081e3, -2.180645069035755e3]
+# Horizons physical data for target 399: 'Sidereal orb period = 365.25636 d'; days times 86400.
+sidereal_orbit_period_s = 3.1558149504e7
+# Pole and prime meridian: IAU WGCCRE 2009 report (the 2015 report does not revise this body's orientation), as BODY399_POLE_RA,
+# BODY399_POLE_DEC, and BODY399_PM in pck00011.tpc, evaluated at J2000.
+pole_ra_deg = 0.0
+pole_dec_deg = 90.0
+prime_meridian_deg = 190.147
+rotation_rate_deg_per_day = 360.9856235
+state = "solid"
+# NASA NSSDCA Earth fact sheet: 'Black-body temperature (K) 254.0'.
+temperature_k = 254.0
+# Bands long to short wavelength (600 to 700 nm, 500 to 600 nm, 400 to
+# 500 nm). Mean of the three is the geometric albedo 0.434 (NASA NSSDCA Earth fact sheet: 'Geometric albedo 0.434');
+# tint: bluish from Rayleigh scattering and open water.
+albedo = [0.38, 0.42, 0.502]
+roughness = 0.6
+# Solid: a hard surface, no volumetric extinction.
+attenuation_m2_per_kg = 0.0
+# 8 * mean_radius_m.
+root_extent_m = 5.096808e7
+max_depth = 6
+
+[[body]]
+frame_id = 5
+# The system barycenter (root).
+parent_frame_id = 0
+# Compiler-side only; never emitted.
+name = "Mars"
+# BODY499_GM = 4.282837362069909E+04 km^3/s^2 (NAIF gm_de440.tpc); GM * 1e9 / 6.67430e-11.
+mass_kg = 6.416908682663215e23
+# Horizons physical data for target 499: 'Vol. mean radius (km) = 3389.92+-0.04'.
+mean_radius_m = 3.38992e6
+# Horizons COMMAND='499' CENTER='@0', X Y Z in km times 1000.
+position_m = [2.06980433836461e11, -1.864170112571357e8, -5.667227497442207e9]
+# Horizons COMMAND='499' CENTER='@0', VX VY VZ in km/s times 1000.
+velocity_m_per_s = [1.171984975692608e3, 2.390670819298843e4, 1.093392065056128e4]
+# Horizons physical data for target 499: 'Mean sidereal orb per = 686.98 d'; days times 86400.
+sidereal_orbit_period_s = 5.9355072e7
+# Pole and prime meridian: IAU WGCCRE 2015 report, as BODY499_POLE_RA,
+# BODY499_POLE_DEC, and BODY499_PM in pck00011.tpc, evaluated at J2000.
+pole_ra_deg = 317.680854407
+pole_dec_deg = 52.886439275
+prime_meridian_deg = 176.632059732
+rotation_rate_deg_per_day = 350.8919824433
+state = "solid"
+# NASA NSSDCA Mars fact sheet: 'Black-body temperature (K) 209.8'.
+temperature_k = 209.8
+# Bands long to short wavelength (600 to 700 nm, 500 to 600 nm, 400 to
+# 500 nm). Mean of the three is the geometric albedo 0.170 (NASA NSSDCA Mars fact sheet: 'Geometric albedo 0.170');
+# tint: iron oxide dust, strongly red.
+albedo = [0.26, 0.15, 0.1]
+roughness = 0.85
+# Solid: a hard surface, no volumetric extinction.
+attenuation_m2_per_kg = 0.0
+# 8 * mean_radius_m.
+root_extent_m = 2.711936e7
+max_depth = 6
+
+[[body]]
+frame_id = 6
+# The system barycenter (root).
+parent_frame_id = 0
+# Compiler-side only; never emitted.
+name = "Jupiter"
+# BODY599_GM = 1.266865319003704E+08 km^3/s^2 (NAIF gm_de440.tpc); GM * 1e9 / 6.67430e-11.
+mass_kg = 1.898124625809005e27
+# Horizons physical data for target 599: 'Vol. Mean Radius (km) = 69911+-6'.
+mean_radius_m = 6.9911e7
+# Horizons COMMAND='599' CENTER='@0', X Y Z in km times 1000.
+position_m = [5.974999178516835e11, 4.089902697993661e11, 1.607562616932818e11]
+# Horizons COMMAND='599' CENTER='@0', VX VY VZ in km/s times 1000.
+velocity_m_per_s = [-7.900547720245487e3, 1.01718725762267e4, 4.552504127783227e3]
+# Horizons physical data for target 599: 'Sidereal orbit period = 4332.589 d'; days times 86400.
+sidereal_orbit_period_s = 3.743356896e8
+# Pole and prime meridian: IAU WGCCRE 2015 report, as BODY599_POLE_RA,
+# BODY599_POLE_DEC, and BODY599_PM in pck00011.tpc, evaluated at J2000.
+pole_ra_deg = 268.057204043
+pole_dec_deg = 64.495809953
+prime_meridian_deg = 284.95
+rotation_rate_deg_per_day = 870.536
+state = "gas"
+# NASA NSSDCA Jupiter fact sheet: 'Black-body temperature (K) 109.9'.
+temperature_k = 109.9
+# Bands long to short wavelength (600 to 700 nm, 500 to 600 nm, 400 to
+# 500 nm). Mean of the three is the geometric albedo 0.538 (NASA NSSDCA Jupiter fact sheet: 'Geometric albedo 0.538');
+# tint: tan and cream cloud bands, darker in the blue band.
+albedo = [0.6, 0.54, 0.474]
+roughness = 0.4
+# Chosen so attenuation * mean density * 0.01 * mean radius >= 10: opaque
+# within one percent of the radius (asserted in tests/data.rs).
+attenuation_m2_per_kg = 1e-07
+# 8 * mean_radius_m.
+root_extent_m = 5.59288e8
+max_depth = 6
+
+[[body]]
+frame_id = 7
+# The system barycenter (root).
+parent_frame_id = 0
+# Compiler-side only; never emitted.
+name = "Saturn"
+# BODY699_GM = 3.793120623436167E+07 km^3/s^2 (NAIF gm_de440.tpc); GM * 1e9 / 6.67430e-11.
+mass_kg = 5.683173701266302e26
+# Horizons physical data for target 699: 'Vol. Mean Radius (km) = 58232+-6'.
+mean_radius_m = 5.8232e7
+# Horizons COMMAND='699' CENTER='@0', X Y Z in km times 1000.
+position_m = [9.573176521103407e11, 9.233194350574769e11, 3.401627932740891e11]
+# Horizons COMMAND='699' CENTER='@0', VX VY VZ in km/s times 1000.
+velocity_m_per_s = [-7.42190038683812e3, 6.098450820882325e3, 2.837547973276323e3]
+# Horizons physical data for target 699: 'Sidereal orbit period = 10755.698 d'; days times 86400.
+sidereal_orbit_period_s = 9.292923072e8
+# Pole and prime meridian: IAU WGCCRE 2015 report, as BODY699_POLE_RA,
+# BODY699_POLE_DEC, and BODY699_PM in pck00011.tpc, evaluated at J2000.
+pole_ra_deg = 40.589
+pole_dec_deg = 83.537
+prime_meridian_deg = 38.9
+rotation_rate_deg_per_day = 810.7939024
+state = "gas"
+# NASA NSSDCA Saturn fact sheet: 'Black-body temperature (K) 81.0'.
+temperature_k = 81.0
+# Bands long to short wavelength (600 to 700 nm, 500 to 600 nm, 400 to
+# 500 nm). Mean of the three is the geometric albedo 0.499 (NASA NSSDCA Saturn fact sheet: 'Geometric albedo 0.499');
+# tint: pale gold haze, darker in the blue band.
+albedo = [0.56, 0.51, 0.427]
+roughness = 0.4
+# Chosen so attenuation * mean density * 0.01 * mean radius >= 10: opaque
+# within one percent of the radius (asserted in tests/data.rs).
+attenuation_m2_per_kg = 1e-07
+# 8 * mean_radius_m.
+root_extent_m = 4.65856e8
+max_depth = 6
+
+[[body]]
+frame_id = 8
+# The system barycenter (root).
+parent_frame_id = 0
+# Compiler-side only; never emitted.
+name = "Uranus"
+# BODY799_GM = 5.793951256527211E+06 km^3/s^2 (NAIF gm_de440.tpc); GM * 1e9 / 6.67430e-11.
+mass_kg = 8.680987154498916e25
+# Horizons physical data for target 799: 'Vol. Mean Radius (km) = 25362+-12'.
+mean_radius_m = 2.5362e7
+# Horizons COMMAND='799' CENTER='@0', X Y Z in km times 1000.
+position_m = [2.157907112723417e12, -1.871307099571182e12, -8.501069259961469e11]
+# Horizons COMMAND='799' CENTER='@0', VX VY VZ in km/s times 1000.
+velocity_m_per_s = [4.646584677611653e3, 4.251110198227456e3, 1.796121552064855e3]
+# Horizons physical data for target 799: 'Sidereal orbit period = 30685.4 d'; days times 86400.
+sidereal_orbit_period_s = 2.65121856e9
+# Pole and prime meridian: IAU WGCCRE 2015 report, as BODY799_POLE_RA,
+# BODY799_POLE_DEC, and BODY799_PM in pck00011.tpc, evaluated at J2000.
+pole_ra_deg = 257.311
+pole_dec_deg = -15.175
+prime_meridian_deg = 203.81
+rotation_rate_deg_per_day = -501.1600928
+state = "gas"
+# NASA NSSDCA Uranus fact sheet: 'Black-body temperature (K) 58.1'.
+temperature_k = 58.1
+# Bands long to short wavelength (600 to 700 nm, 500 to 600 nm, 400 to
+# 500 nm). Mean of the three is the geometric albedo 0.488 (NASA NSSDCA Uranus fact sheet: 'Geometric albedo 0.488');
+# tint: methane absorbs the red band, leaving a pale cyan.
+albedo = [0.38, 0.52, 0.564]
+roughness = 0.4
+# Chosen so attenuation * mean density * 0.01 * mean radius >= 10: opaque
+# within one percent of the radius (asserted in tests/data.rs).
+attenuation_m2_per_kg = 1e-07
+# 8 * mean_radius_m.
+root_extent_m = 2.02896e8
+max_depth = 6
+
+[[body]]
+frame_id = 9
+# The system barycenter (root).
+parent_frame_id = 0
+# Compiler-side only; never emitted.
+name = "Neptune"
+# BODY899_GM = 6.835103145462294E+06 km^3/s^2 (NAIF gm_de440.tpc); GM * 1e9 / 6.67430e-11.
+mass_kg = 1.024092885465486e26
+# Horizons physical data for target 899: 'Vol. mean radius (km) = 24624+-21'.
+mean_radius_m = 2.4624e7
+# Horizons COMMAND='899' CENTER='@0', X Y Z in km times 1000.
+position_m = [2.513978816984908e12, -3.438170168305322e12, -1.469851595078865e12]
+# Horizons COMMAND='899' CENTER='@0', VX VY VZ in km/s times 1000.
+velocity_m_per_s = [4.47458791838248e3, 2.876584787253288e3, 1.0657731203769e3]
+# Horizons physical data for target 899: 'Sidereal orbit period = 60189 d'; days times 86400.
+sidereal_orbit_period_s = 5.2003296e9
+# Pole and prime meridian: IAU WGCCRE 2015 report, as BODY899_POLE_RA,
+# BODY899_POLE_DEC, and BODY899_PM in pck00011.tpc, evaluated at J2000.
+pole_ra_deg = 299.333738959
+pole_dec_deg = 42.950359022
+prime_meridian_deg = 249.996007571
+rotation_rate_deg_per_day = 541.1397757
+state = "gas"
+# NASA NSSDCA Neptune fact sheet: 'Black-body temperature (K) 46.6'.
+temperature_k = 46.6
+# Bands long to short wavelength (600 to 700 nm, 500 to 600 nm, 400 to
+# 500 nm). Mean of the three is the geometric albedo 0.442 (NASA NSSDCA Neptune fact sheet: 'Geometric albedo 0.442');
+# tint: methane absorbs the red band more strongly than on Uranus, a deeper blue.
+albedo = [0.3, 0.44, 0.586]
+roughness = 0.4
+# Chosen so attenuation * mean density * 0.01 * mean radius >= 10: opaque
+# within one percent of the radius (asserted in tests/data.rs).
+attenuation_m2_per_kg = 1e-07
+# 8 * mean_radius_m.
+root_extent_m = 1.96992e8
+max_depth = 6
+
+[[body]]
+frame_id = 10
+# The Earth frame.
+parent_frame_id = 4
+# Compiler-side only; never emitted.
+name = "Moon"
+# BODY301_GM = 4.9028001184575496D+03 km^3/s^2 (NAIF gm_de440.tpc); GM * 1e9 / 6.67430e-11.
+mass_kg = 7.345789248996225e22
+# Horizons physical data for target 301: 'Vol. mean radius, km = 1737.53+-0.03'.
+mean_radius_m = 1.73753e6
+# Horizons COMMAND='301' CENTER='@399', X Y Z in km times 1000.
+position_m = [-2.916083841877129e8, -2.667168338540655e8, -7.610248730658794e7]
+# Horizons COMMAND='301' CENTER='@399', VX VY VZ in km/s times 1000.
+velocity_m_per_s = [6.435313889889519e2, -6.660876829565195e2, -3.013257046610932e2]
+# Horizons physical data for target 301: 'Orbit period = 27.321582 d' (sidereal, about the Earth); days times 86400.
+sidereal_orbit_period_s = 2.3605846848e6
+# Pole and prime meridian: IAU WGCCRE 2009 report (the 2015 report does not revise this body's orientation), as BODY301_POLE_RA,
+# BODY301_POLE_DEC, and BODY301_PM in pck00011.tpc, evaluated at J2000.
+pole_ra_deg = 266.857733445
+pole_dec_deg = 65.641102748
+prime_meridian_deg = 41.195263981
+rotation_rate_deg_per_day = 13.17635815
+state = "solid"
+# NASA NSSDCA Moon fact sheet: 'Black-body temperature (K) 270.4'.
+temperature_k = 270.4
+# Bands long to short wavelength (600 to 700 nm, 500 to 600 nm, 400 to
+# 500 nm). Mean of the three is the geometric albedo 0.12 (NASA NSSDCA Moon fact sheet: 'Geometric albedo 0.12');
+# tint: grey regolith, slightly brighter toward the red.
+albedo = [0.13, 0.12, 0.11]
+roughness = 0.9
+# Solid: a hard surface, no volumetric extinction.
+attenuation_m2_per_kg = 0.0
+# 8 * mean_radius_m.
+root_extent_m = 1.390024e7
+max_depth = 6
