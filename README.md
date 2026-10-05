@@ -43,11 +43,14 @@ crates/system-compiler/    library crate `system_compiler` and binary
   tests/golden.json        the golden hashes (see docs/compile.md)
   tests/hub_mock.rs        serve against a mock hub: submissions, 409,
                            400, reconnect, 4401, duplicate jobs
+  tests/describe.rs        describe --from-file, bare and in a container
 docs/data-sources.md       every source, request, response, and conversion
 docs/model.md              how a body becomes matter, and what is not modeled
 docs/compile.md            how a chunk key becomes bytes; golden policy
 docs/protocol.md           the hub's compiler protocol, from the hub's code
+docs/e2e.md                a recorded run of scripts/e2e.sh
 scripts/ci.sh              format, clippy, tests, dash check
+scripts/e2e.sh             end to end against the real hub in one container
 scripts/iau-at-epoch.py    evaluates IAU rotational elements at J2000
 ```
 
@@ -65,6 +68,11 @@ cargo run -p system-compiler -- compile --data data/system.toml --key 4-2-1-1-1 
 # resolution, non-vacuum count, and mass, or the registry's frames.
 cargo run -p system-compiler -- describe --data data/system.toml --key registry
 cargo run -p system-compiler -- describe --data data/system.toml --key 4-2-1-1-1
+
+# Describe bytes from a file instead of compiling. --container decodes the
+# hub's chunk container (one section per layer), the body of a chunk GET.
+cargo run -p system-compiler -- describe --key 4-1-0-0-0 --from-file cell.bin
+cargo run -p system-compiler -- describe --key registry --from-file chunk.bin --container
 
 # Every cell key of a frame at a depth whose section is not empty, sorted.
 cargo run -p system-compiler -- keys --data data/system.toml --frame 4 --depth 2
@@ -120,6 +128,18 @@ code `4401`, or `401`/`403` on the upgrade or on a submission), and runs
 until interrupted otherwise, reconnecting with backoff when the socket
 drops. `--once` exits after the socket closes the first time. `RUST_LOG`
 sets the log level (default `info`).
+
+## End to end against the real hub
+
+`sh scripts/e2e.sh` copies the hub repository (default `/context/3GIXHub`)
+to `/tmp/hub`, starts it with the hub's own container harness
+(`scripts/e2e/hub-up.sh`: Redis, a SeaweedFS S3 gateway, Postgres, the hub,
+and its seed), runs `serve` against it, and checks the registry, frame 4 at
+depth 1 and two empty cells, the cache header, mass conservation, a cache
+hit with no new job, `409` on a repeated submission, and `400` on a
+malformed one. It resets the hub's database and object store first unless
+`GX_E2E_KEEP_STATE=1`, prints one line per assertion, and exits 0 only if
+every one passed. A recorded run is in `docs/e2e.md`.
 
 ## Specification
 

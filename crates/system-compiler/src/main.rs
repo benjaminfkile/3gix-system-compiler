@@ -4,8 +4,11 @@
 //!
 //! - `compile`: compile one chunk key to bytes (file or stdout), reporting
 //!   the byte length and SHA-256 on stderr.
-//! - `describe`: compile one chunk key, decode it with gx-core, and print a
-//!   JSON summary of the section or the registry.
+//! - `describe`: compile one chunk key, or read bytes from a file with
+//!   `--from-file`, decode them with gx-core, and print a JSON summary of
+//!   the section or the registry. `--container` decodes the file as a hub
+//!   container (`matter-format.md` section 6), the body the hub serves for
+//!   a chunk request.
 //! - `keys`: list every cell key of a frame at one depth whose section is
 //!   not empty, one per line, sorted by `(x, y, z)`.
 //! - `frames`: list the frames of the registry with their compiler-side
@@ -25,8 +28,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use gx_core::key::ChunkKey;
-use gx_core::matter::Compression;
+use gx_core::key::{CellKey, ChunkKey};
+use gx_core::matter::{Compression, Section};
 use gx_core::registry::ROOT_PARENT;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -59,14 +62,23 @@ enum Command {
         #[arg(long)]
         no_compress: bool,
     },
-    /// Compile one chunk key and print a JSON summary of the decoded result.
+    /// Compile one chunk key, or read bytes from a file, and print a JSON
+    /// summary of the decoded result.
     Describe {
-        /// System data file; the bundled data when omitted.
+        /// System data file; the bundled data when omitted. Unused with
+        /// `--from-file`.
         #[arg(long)]
         data: Option<PathBuf>,
         /// Chunk key: `registry` or `frameId-depth-x-y-z`.
         #[arg(long)]
         key: String,
+        /// Describe the bytes in this file instead of compiling the key.
+        #[arg(long)]
+        from_file: Option<PathBuf>,
+        /// Decode the bytes as a hub container (a section table followed by
+        /// the sections of every layer), as the hub serves a chunk.
+        #[arg(long, requires = "from_file")]
+        container: bool,
     },
     /// List the cell keys at one depth of a frame whose section is not empty.
     Keys {
@@ -164,12 +176,28 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             }
             eprintln!("{} bytes sha256 {}", bytes.len(), sha256_hex(&bytes));
         }
-        Command::Describe { data, key } => {
-            let system = load(data.as_ref())?;
+        Command::Describe {
+            data,
+            key,
+            from_file,
+            container,
+        } => {
             let key = parse_key(&key)?;
-            let bytes = compile(&system, &key, &CompileOptions::default())
-                .with_context(|| format!("compiling {key}"))?;
-            let summary = describe(&key, &bytes)?;
+            let bytes = match &from_file {
+                Some(path) => {
+                    std::fs::read(path).with_context(|| format!("reading {}", path.display()))?
+                }
+                None => {
+                    let system = load(data.as_ref())?;
+                    compile(&system, &key, &CompileOptions::default())
+                        .with_context(|| format!("compiling {key}"))?
+                }
+            };
+            let summary = if container {
+                describe_container(&key, &bytes)?
+            } else {
+                describe(&key, &bytes)?
+            };
             println!("{}", serde_json::to_string_pretty(&summary)?);
         }
         Command::Keys { data, frame, depth } => {
@@ -247,64 +275,96 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Decodes compiled bytes with gx-core and summarizes them as JSON.
+/// Decodes one section or registry with gx-core and summarizes it as JSON.
 fn describe(key: &ChunkKey, bytes: &[u8]) -> anyhow::Result<Value> {
-    let sha = sha256_hex(bytes);
-    match key {
+    let mut summary = match key {
+        ChunkKey::Registry => registry_json(&gx_core::registry::decode(bytes)?),
+        ChunkKey::Cell(cell) => section_json(cell, &gx_core::matter::decode(cell, bytes)?),
+    };
+    summary["key"] = json!(key.to_string());
+    summary["bytes"] = json!(bytes.len());
+    summary["sha256"] = json!(sha256_hex(bytes));
+    Ok(summary)
+}
+
+/// Decodes a hub container (`matter-format.md` section 6) with gx-core's
+/// container decoder and summarizes it as JSON: one entry per section in
+/// layer order. For a cell key, `mass_kg` is the sum over the sections; for
+/// the registry, `frame_count` is the total over the registries.
+fn describe_container(key: &ChunkKey, bytes: &[u8]) -> anyhow::Result<Value> {
+    let mut summary = match key {
         ChunkKey::Registry => {
-            let reg = gx_core::registry::decode(bytes)?;
-            let frames: Vec<Value> = reg
-                .frames()
-                .iter()
-                .map(|f| {
-                    let q = f.orientation;
-                    json!({
-                        "frame_id": f.frame_id,
-                        "parent_frame_id": (f.parent_frame_id != ROOT_PARENT)
-                            .then_some(f.parent_frame_id),
-                        "root_extent_m": f.root_extent.value(),
-                        "max_depth": f.max_depth,
-                        "mass_kg": f.mass.value(),
-                        "position_m": [f.position.x, f.position.y, f.position.z],
-                        "velocity_m_per_s": [f.velocity.x, f.velocity.y, f.velocity.z],
-                        "orientation_xyzw": [q.x, q.y, q.z, q.w],
-                        "angular_velocity_rad_per_s":
-                            [f.angular_velocity.x, f.angular_velocity.y, f.angular_velocity.z],
-                    })
-                })
-                .collect();
-            Ok(json!({
-                "key": key.to_string(),
-                "bytes": bytes.len(),
-                "sha256": sha,
-                "epoch_s": reg.epoch().value(),
-                "frame_count": frames.len(),
-                "frames": frames,
-            }))
+            let registries = gx_core::container::decode_registry_chunk(bytes)?;
+            let frame_count: usize = registries.iter().map(|r| r.frames().len()).sum();
+            json!({
+                "section_count": registries.len(),
+                "frame_count": frame_count,
+                "sections": registries.iter().map(registry_json).collect::<Vec<_>>(),
+            })
         }
         ChunkKey::Cell(cell) => {
-            let s = gx_core::matter::decode(cell, bytes)?;
-            let non_vacuum = s.samples().map_or(0, |samples| {
-                samples.iter().filter(|x| x.density.value() > 0.0).count()
-            });
-            let o = s.origin();
-            Ok(json!({
-                "key": key.to_string(),
-                "bytes": bytes.len(),
-                "sha256": sha,
-                "frame_id": cell.frame_id,
-                "depth": cell.depth,
-                "cell": [cell.x, cell.y, cell.z],
-                "cell_origin_m": [o.x, o.y, o.z],
-                "cell_edge_m": s.edge().value(),
-                "empty": s.is_empty(),
-                "resolution": s.resolution(),
-                "samples": s.samples().map_or(0, |x| x.len()),
-                "non_vacuum": non_vacuum,
-                "mass_kg": s.mass().value(),
-            }))
+            let sections = gx_core::container::decode_chunk(cell, bytes)?;
+            let mass: f64 = sections.iter().map(|s| s.mass().value()).sum();
+            json!({
+                "section_count": sections.len(),
+                "mass_kg": mass,
+                "sections": sections.iter().map(|s| section_json(cell, s)).collect::<Vec<_>>(),
+            })
         }
-    }
+    };
+    summary["key"] = json!(key.to_string());
+    summary["bytes"] = json!(bytes.len());
+    summary["sha256"] = json!(sha256_hex(bytes));
+    Ok(summary)
+}
+
+/// JSON summary of one decoded registry: epoch and every frame.
+fn registry_json(reg: &gx_core::registry::Registry) -> Value {
+    let frames: Vec<Value> = reg
+        .frames()
+        .iter()
+        .map(|f| {
+            let q = f.orientation;
+            json!({
+                "frame_id": f.frame_id,
+                "parent_frame_id": (f.parent_frame_id != ROOT_PARENT)
+                    .then_some(f.parent_frame_id),
+                "root_extent_m": f.root_extent.value(),
+                "max_depth": f.max_depth,
+                "mass_kg": f.mass.value(),
+                "position_m": [f.position.x, f.position.y, f.position.z],
+                "velocity_m_per_s": [f.velocity.x, f.velocity.y, f.velocity.z],
+                "orientation_xyzw": [q.x, q.y, q.z, q.w],
+                "angular_velocity_rad_per_s":
+                    [f.angular_velocity.x, f.angular_velocity.y, f.angular_velocity.z],
+            })
+        })
+        .collect();
+    json!({
+        "epoch_s": reg.epoch().value(),
+        "frame_count": frames.len(),
+        "frames": frames,
+    })
+}
+
+/// JSON summary of one decoded matter section of `cell`.
+fn section_json(cell: &CellKey, s: &Section) -> Value {
+    let non_vacuum = s.samples().map_or(0, |samples| {
+        samples.iter().filter(|x| x.density.value() > 0.0).count()
+    });
+    let o = s.origin();
+    json!({
+        "frame_id": cell.frame_id,
+        "depth": cell.depth,
+        "cell": [cell.x, cell.y, cell.z],
+        "cell_origin_m": [o.x, o.y, o.z],
+        "cell_edge_m": s.edge().value(),
+        "empty": s.is_empty(),
+        "resolution": s.resolution(),
+        "samples": s.samples().map_or(0, |x| x.len()),
+        "non_vacuum": non_vacuum,
+        "mass_kg": s.mass().value(),
+    })
 }
 
 /// Prints one line per registry frame, with compiler-side names.

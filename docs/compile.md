@@ -26,12 +26,13 @@ pub fn compile(system: &System, key: &ChunkKey, opts: &CompileOptions) -> Result
 | Depth | Samples per axis |
 |---|---|
 | 0 | 8 |
-| 1, 2 | 16 |
+| 1 | 32 |
+| 2 | 16 |
 | 3, 4 | 32 |
 | 5 | 48 |
 | 6 and beyond | 64, the format's maximum |
 
-Every body frame has an extent of 8 mean radii, so at depth 2 the eight central cells each hold one octant of the ball at 16 samples per axis, which is 64 samples across the diameter.
+Every body frame has an extent of 8 mean radii. At depth 2 the cell edge is 2 radii and the eight central cells each hold one octant of the ball, which spans half of each cell along each axis: at 16 samples per axis the diameter is 16 samples (64 sub-sampling points). At depth 1 the cell edge is 4 radii and the ball spans only a quarter of each cell along each axis, so depth 1 takes 32 samples per axis to put the same 16 samples across the diameter. At 16 the summed mass at depth 1 was 0.58 percent high, over the 0.5 percent the end to end test (`scripts/e2e.sh`, `docs/e2e.md`) allows. Depth 0 stays at 8: one cell holds the whole body, and its summed mass is 4.4 percent high; no test checks it, and the registry's `mass` stays the authoritative value.
 
 ## Sub-sampling
 
@@ -43,7 +44,7 @@ coordinate_k = origin + step * (k + 0.5),   k = 0 .. 4n - 1, per axis
 
 Each sample's sub-cube holds `4 x 4 x 4 = 64` of those points, at offsets `(i + 0.5) / 4` of its edge. A point is inside when `x^2 + y^2 + z^2 <= r^2`, summed in that order, the same rule as `Body::contains`. `fraction = inside / 64`.
 
-Mass conservation (`tests/compile.rs`): the summed mass of the non-empty depth 2 cells of frames 1, 4, and 10 is within 0.5 percent of each frame's mass in the data file. Achieved error is 8.6e-4 (0.086 percent) for all three, identical because every frame extent is the same multiple of its radius. The sampled densities exist for rendering only; the registry's `mass` stays authoritative (section 5.2).
+Mass conservation (`tests/compile.rs`): the summed mass of the non-empty depth 1 cells and of the non-empty depth 2 cells of frames 1, 4, and 10 is within 0.5 percent of each frame's mass in the data file. Achieved error is 8.6e-4 (0.086 percent) at both depths for all three, identical because every frame extent is the same multiple of its radius. The sampled densities exist for rendering only; the registry's `mass` stays authoritative (section 5.2).
 
 ## Determinism contract
 
@@ -74,3 +75,7 @@ UPDATE_GOLDEN=1 cargo test -p system-compiler --test golden
 ```
 
 Then commit the diff of `golden.json` in the same change as its cause, saying why the bytes changed.
+
+Golden changes so far:
+
+- `1-1-0-0-0`: depth 1 went from 16 to 32 samples per axis so that the summed mass of the depth 1 cells is within 0.5 percent of each frame's mass (0.086 percent, was 0.58). No other key changed.

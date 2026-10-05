@@ -25,9 +25,14 @@ use crate::model::{Body, System};
 /// `SUBSAMPLES^3` stratified points that fall inside the ball.
 pub const SUBSAMPLES: u32 = 4;
 
-/// The default resolution table: 8 at depth 0, 16 at depths 1 and 2, 32 at
-/// depths 3 and 4, 48 at depth 5, and 64 (the format's maximum) from depth
-/// 6 on.
+/// The default resolution table: 8 at depth 0, 32 at depth 1, 16 at depth
+/// 2, 32 at depths 3 and 4, 48 at depth 5, and 64 (the format's maximum)
+/// from depth 6 on.
+///
+/// Depth 1 has more samples per axis than depth 2 because a body spans only
+/// a quarter of each depth 1 cell along each axis: at 16 the ball is 8
+/// samples across and the summed mass is 0.58 percent high; at 32 it is 16
+/// samples across, as at depth 2, and the error is 0.086 percent.
 pub const DEFAULT_RESOLUTION_BY_DEPTH: [u8; 32] = default_resolution_table();
 
 const fn default_resolution_table() -> [u8; 32] {
@@ -38,7 +43,7 @@ const fn default_resolution_table() -> [u8; 32] {
     };
     let mut t = [top; 32];
     t[0] = 8;
-    t[1] = 16;
+    t[1] = 32;
     t[2] = 16;
     t[3] = 32;
     t[4] = 32;
@@ -274,7 +279,7 @@ mod tests {
     #[test]
     fn default_table() {
         let t = DEFAULT_RESOLUTION_BY_DEPTH;
-        assert_eq!(&t[..7], &[8, 16, 16, 32, 32, 48, 64]);
+        assert_eq!(&t[..7], &[8, 32, 16, 32, 32, 48, 64]);
         assert!(t[7..].iter().all(|&n| n == 64));
     }
 }
