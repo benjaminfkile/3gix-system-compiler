@@ -30,7 +30,9 @@ crates/system-compiler/    library crate `system_compiler` and binary
   src/model.rs             System: load and validate the data, build the
                            registry, sample the matter model
   src/compile.rs           chunk key to validated, deterministic section
-  src/main.rs              CLI: compile, describe, keys, frames
+  src/hub.rs               hub client: config, WebSocket jobs, submit,
+                           reconnect, and the serve daemon
+  src/main.rs              CLI: compile, describe, keys, frames, serve
   src/rotation.rs          IAU rotational elements to orientation and spin
   src/orbit.rs             osculating elements from a state vector
   src/detmath.rs           deterministic sine and cosine
@@ -39,9 +41,12 @@ crates/system-compiler/    library crate `system_compiler` and binary
   tests/compile.rs         mass conservation, exact empty cells, key listing
   tests/golden.rs          golden SHA-256 hashes and determinism
   tests/golden.json        the golden hashes (see docs/compile.md)
+  tests/hub_mock.rs        serve against a mock hub: submissions, 409,
+                           400, reconnect, 4401, duplicate jobs
 docs/data-sources.md       every source, request, response, and conversion
 docs/model.md              how a body becomes matter, and what is not modeled
 docs/compile.md            how a chunk key becomes bytes; golden policy
+docs/protocol.md           the hub's compiler protocol, from the hub's code
 scripts/ci.sh              format, clippy, tests, dash check
 scripts/iau-at-epoch.py    evaluates IAU rotational elements at J2000
 ```
@@ -72,8 +77,49 @@ cargo run -p system-compiler -- frames
 `data/system.toml` baked in at build time. How a key becomes bytes, the
 resolution table, and the golden hash policy are in `docs/compile.md`.
 
-Connecting to the hub arrives in later work; the environment variables in
-`.env.example` are for that.
+## Running against a hub
+
+`serve` holds the hub's compiler WebSocket, compiles every job the hub
+dispatches, and submits the sections. The protocol, the status handling, and
+the reconnect policy are in `docs/protocol.md`.
+
+```
+cargo run --release -p system-compiler -- serve --data data/system.toml
+cargo run --release -p system-compiler -- serve --data data/system.toml --workers 8
+cargo run --release -p system-compiler -- serve --env-file path/to/.env --once
+```
+
+It reads four variables, from the environment or from a `.env` file (the
+one named by `--env-file`, or `.env` in the working directory or a parent;
+variables already set win). Values are never logged.
+
+| Variable | Also accepted | Meaning |
+|---|---|---|
+| `GX_HUB_URL` | `HUB_URL` | hub base URL, `http` or `https` |
+| `GX_API_KEY` | `COMPILER_API_KEY` | API key with `compile:submit` |
+| `GX_COMPILER_ID` | `COMPILER_ID` | the compiler's id |
+| `GX_COMPILER_SECRET` | `COMPILER_SECRET` | the compiler's raw shared secret |
+
+The second column holds the names the hub's local seed script writes, so the
+`.env` it produces works as is:
+
+1. Start the hub and run its seed script, `scripts/local-seed.ps1` in the
+   hub repository. It registers a compiler, creates a build, and writes
+   `.env` into a sibling directory named `3gixhub-dummy-compiler` when that
+   directory exists. Create the directory first, or copy the values the
+   script prints into `.env` here using `.env.example` as the template.
+2. Run `serve` with `--env-file` pointing at that file, or copy it here as
+   `.env`. Its extra variables are ignored. If it names an `https` hub with
+   a self-signed certificate (`INSECURE_TLS=true`), point `GX_HUB_URL` at
+   the hub's plain `http` port instead: this compiler always verifies TLS.
+3. Request a chunk from the hub; the job, its byte length, the hub's status,
+   and the elapsed time appear as one log line on stderr.
+
+`serve` exits non-zero when the hub refuses the credentials (WebSocket close
+code `4401`, or `401`/`403` on the upgrade or on a submission), and runs
+until interrupted otherwise, reconnecting with backoff when the socket
+drops. `--once` exits after the socket closes the first time. `RUST_LOG`
+sets the log level (default `info`).
 
 ## Specification
 

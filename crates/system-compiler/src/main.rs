@@ -10,14 +10,18 @@
 //!   not empty, one per line, sorted by `(x, y, z)`.
 //! - `frames`: list the frames of the registry with their compiler-side
 //!   names, for humans.
+//! - `serve`: run as a registered compiler: hold the hub's WebSocket,
+//!   compile the jobs it pushes, and submit the sections (see
+//!   `docs/protocol.md`). Configuration comes from the environment and an
+//!   optional `.env` file.
 //!
 //! Every subcommand reads the system from `--data`, or from the data baked
-//! into the binary when `--data` is omitted. The hub connection arrives in
-//! later work.
+//! into the binary when `--data` is omitted.
 
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -27,6 +31,7 @@ use gx_core::registry::ROOT_PARENT;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use system_compiler::compile::{compile, non_empty_keys, CompileOptions};
+use system_compiler::hub::{self, Backoff, HubClient, HubConfig, ServeOptions};
 use system_compiler::System;
 
 /// Compiles a planetary system into 3GIX matter.
@@ -80,6 +85,29 @@ enum Command {
         /// System data file; the bundled data when omitted.
         #[arg(long)]
         data: Option<PathBuf>,
+    },
+    /// Connect to the hub and compile the jobs it dispatches until
+    /// interrupted. Reads GX_HUB_URL, GX_API_KEY, GX_COMPILER_ID and
+    /// GX_COMPILER_SECRET from the environment or a `.env` file.
+    Serve {
+        /// System data file; the bundled data when omitted.
+        #[arg(long)]
+        data: Option<PathBuf>,
+        /// Jobs compiled and submitted at once.
+        #[arg(long, default_value_t = hub::DEFAULT_WORKERS as u16,
+              value_parser = clap::value_parser!(u16).range(1..))]
+        workers: u16,
+        /// Exit after the socket closes the first time, once every received
+        /// job has finished.
+        #[arg(long)]
+        once: bool,
+        /// Environment file to load; `.env` in the working directory or a
+        /// parent when omitted. Variables already set are not overridden.
+        #[arg(long)]
+        env_file: Option<PathBuf>,
+        /// Seed of the reconnect jitter generator.
+        #[arg(long, default_value_t = hub::DEFAULT_BACKOFF_SEED)]
+        backoff_seed: u64,
     },
 }
 
@@ -152,7 +180,62 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Command::Frames { data } => frames(&load(data.as_ref())?),
+        Command::Serve {
+            data,
+            workers,
+            once,
+            env_file,
+            backoff_seed,
+        } => serve(data, usize::from(workers), once, env_file, backoff_seed)?,
     }
+    Ok(())
+}
+
+/// Runs the `serve` subcommand. Logs go to stderr through `tracing`, at
+/// `info` unless `RUST_LOG` says otherwise.
+fn serve(
+    data: Option<PathBuf>,
+    workers: usize,
+    once: bool,
+    env_file: Option<PathBuf>,
+    backoff_seed: u64,
+) -> anyhow::Result<()> {
+    use std::io::IsTerminal;
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .init();
+
+    hub::load_dotenv(env_file.as_deref())?;
+    let config = HubConfig::from_env()?;
+    let system = Arc::new(load(data.as_ref())?);
+    let client = HubClient::new(config)?.with_seed(backoff_seed);
+    let opts = ServeOptions {
+        workers,
+        once,
+        reconnect: Backoff::standard(backoff_seed),
+        ..ServeOptions::default()
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting the async runtime")?;
+    let shutdown = async {
+        if tokio::signal::ctrl_c().await.is_err() {
+            // No signal handler: run until the process is killed.
+            std::future::pending::<()>().await;
+        }
+    };
+    runtime
+        .block_on(hub::serve(system, client, opts, shutdown))
+        .map_err(|e| {
+            tracing::error!(error = %e, "compiler stopped on an error");
+            anyhow::Error::new(e)
+        })?;
     Ok(())
 }
 
