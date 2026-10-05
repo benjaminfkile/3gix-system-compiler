@@ -1,17 +1,90 @@
 //! `system-compiler`: command line entry point.
 //!
-//! For now it loads the system data (the bundled `data/system.toml`, or a
-//! path given as the only argument), validates it, and prints one line per
-//! frame of the registry it would emit. Compilation and the hub connection
-//! arrive in later tasks.
+//! Subcommands:
+//!
+//! - `compile`: compile one chunk key to bytes (file or stdout), reporting
+//!   the byte length and SHA-256 on stderr.
+//! - `describe`: compile one chunk key, decode it with gx-core, and print a
+//!   JSON summary of the section or the registry.
+//! - `keys`: list every cell key of a frame at one depth whose section is
+//!   not empty, one per line, sorted by `(x, y, z)`.
+//! - `frames`: list the frames of the registry with their compiler-side
+//!   names, for humans.
+//!
+//! Every subcommand reads the system from `--data`, or from the data baked
+//! into the binary when `--data` is omitted. The hub connection arrives in
+//! later work.
 
+use std::io::Write;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Context;
+use clap::{Parser, Subcommand};
+use gx_core::key::ChunkKey;
+use gx_core::matter::Compression;
+use gx_core::registry::ROOT_PARENT;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use system_compiler::compile::{compile, non_empty_keys, CompileOptions};
 use system_compiler::System;
 
+/// Compiles a planetary system into 3GIX matter.
+#[derive(Parser)]
+#[command(name = "system-compiler", version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Compile one chunk key and write its bytes.
+    Compile {
+        /// System data file; the bundled data when omitted.
+        #[arg(long)]
+        data: Option<PathBuf>,
+        /// Chunk key: `registry` or `frameId-depth-x-y-z`.
+        #[arg(long)]
+        key: String,
+        /// Output file; stdout when omitted.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Leave the sample block uncompressed.
+        #[arg(long)]
+        no_compress: bool,
+    },
+    /// Compile one chunk key and print a JSON summary of the decoded result.
+    Describe {
+        /// System data file; the bundled data when omitted.
+        #[arg(long)]
+        data: Option<PathBuf>,
+        /// Chunk key: `registry` or `frameId-depth-x-y-z`.
+        #[arg(long)]
+        key: String,
+    },
+    /// List the cell keys at one depth of a frame whose section is not empty.
+    Keys {
+        /// System data file; the bundled data when omitted.
+        #[arg(long)]
+        data: Option<PathBuf>,
+        /// Frame id.
+        #[arg(long)]
+        frame: u64,
+        /// Cell depth, 0 to 31.
+        #[arg(long, value_parser = clap::value_parser!(u8).range(0..=31))]
+        depth: u8,
+    },
+    /// List the registry's frames with their compiler-side names.
+    Frames {
+        /// System data file; the bundled data when omitted.
+        #[arg(long)]
+        data: Option<PathBuf>,
+    },
+}
+
 fn main() -> ExitCode {
-    match run() {
+    match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("system-compiler: {e:#}");
@@ -20,13 +93,139 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> anyhow::Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let system = match args.as_slice() {
-        [] => System::bundled(),
-        [path] => System::load(path).with_context(|| format!("loading {path}"))?,
-        _ => anyhow::bail!("usage: system-compiler [path/to/system.toml]"),
-    };
+fn load(data: Option<&PathBuf>) -> anyhow::Result<System> {
+    match data {
+        None => Ok(System::bundled()),
+        Some(p) => System::load(p).with_context(|| format!("loading {}", p.display())),
+    }
+}
+
+fn parse_key(key: &str) -> anyhow::Result<ChunkKey> {
+    key.parse::<ChunkKey>()
+        .map_err(|e| anyhow::anyhow!("key {key:?}: {e}"))
+}
+
+fn run(cli: Cli) -> anyhow::Result<()> {
+    match cli.command {
+        Command::Compile {
+            data,
+            key,
+            out,
+            no_compress,
+        } => {
+            let system = load(data.as_ref())?;
+            let key = parse_key(&key)?;
+            let opts = CompileOptions {
+                compression: if no_compress {
+                    Compression::None
+                } else {
+                    Compression::Zstd
+                },
+                ..CompileOptions::default()
+            };
+            let bytes =
+                compile(&system, &key, &opts).with_context(|| format!("compiling {key}"))?;
+            match out {
+                Some(path) => std::fs::write(&path, &bytes)
+                    .with_context(|| format!("writing {}", path.display()))?,
+                None => {
+                    let mut stdout = std::io::stdout().lock();
+                    stdout.write_all(&bytes)?;
+                    stdout.flush()?;
+                }
+            }
+            eprintln!("{} bytes sha256 {}", bytes.len(), sha256_hex(&bytes));
+        }
+        Command::Describe { data, key } => {
+            let system = load(data.as_ref())?;
+            let key = parse_key(&key)?;
+            let bytes = compile(&system, &key, &CompileOptions::default())
+                .with_context(|| format!("compiling {key}"))?;
+            let summary = describe(&key, &bytes)?;
+            println!("{}", serde_json::to_string_pretty(&summary)?);
+        }
+        Command::Keys { data, frame, depth } => {
+            let system = load(data.as_ref())?;
+            let mut stdout = std::io::stdout().lock();
+            for key in non_empty_keys(&system, frame, depth)? {
+                writeln!(stdout, "{key}")?;
+            }
+        }
+        Command::Frames { data } => frames(&load(data.as_ref())?),
+    }
+    Ok(())
+}
+
+/// Lowercase hexadecimal SHA-256 of `bytes`.
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Decodes compiled bytes with gx-core and summarizes them as JSON.
+fn describe(key: &ChunkKey, bytes: &[u8]) -> anyhow::Result<Value> {
+    let sha = sha256_hex(bytes);
+    match key {
+        ChunkKey::Registry => {
+            let reg = gx_core::registry::decode(bytes)?;
+            let frames: Vec<Value> = reg
+                .frames()
+                .iter()
+                .map(|f| {
+                    let q = f.orientation;
+                    json!({
+                        "frame_id": f.frame_id,
+                        "parent_frame_id": (f.parent_frame_id != ROOT_PARENT)
+                            .then_some(f.parent_frame_id),
+                        "root_extent_m": f.root_extent.value(),
+                        "max_depth": f.max_depth,
+                        "mass_kg": f.mass.value(),
+                        "position_m": [f.position.x, f.position.y, f.position.z],
+                        "velocity_m_per_s": [f.velocity.x, f.velocity.y, f.velocity.z],
+                        "orientation_xyzw": [q.x, q.y, q.z, q.w],
+                        "angular_velocity_rad_per_s":
+                            [f.angular_velocity.x, f.angular_velocity.y, f.angular_velocity.z],
+                    })
+                })
+                .collect();
+            Ok(json!({
+                "key": key.to_string(),
+                "bytes": bytes.len(),
+                "sha256": sha,
+                "epoch_s": reg.epoch().value(),
+                "frame_count": frames.len(),
+                "frames": frames,
+            }))
+        }
+        ChunkKey::Cell(cell) => {
+            let s = gx_core::matter::decode(cell, bytes)?;
+            let non_vacuum = s.samples().map_or(0, |samples| {
+                samples.iter().filter(|x| x.density.value() > 0.0).count()
+            });
+            let o = s.origin();
+            Ok(json!({
+                "key": key.to_string(),
+                "bytes": bytes.len(),
+                "sha256": sha,
+                "frame_id": cell.frame_id,
+                "depth": cell.depth,
+                "cell": [cell.x, cell.y, cell.z],
+                "cell_origin_m": [o.x, o.y, o.z],
+                "cell_edge_m": s.edge().value(),
+                "empty": s.is_empty(),
+                "resolution": s.resolution(),
+                "samples": s.samples().map_or(0, |x| x.len()),
+                "non_vacuum": non_vacuum,
+                "mass_kg": s.mass().value(),
+            }))
+        }
+    }
+}
+
+/// Prints one line per registry frame, with compiler-side names.
+fn frames(system: &System) {
     let registry = system.registry();
     println!(
         "epoch {} s TDB since J2000, {} frames",
@@ -50,5 +249,4 @@ fn run() -> anyhow::Result<()> {
             density
         );
     }
-    Ok(())
 }
