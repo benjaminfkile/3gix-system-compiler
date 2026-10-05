@@ -47,6 +47,17 @@ fn depth_two_conserves_mass() {
 }
 
 #[test]
+fn depth_one_conserves_mass() {
+    let s = system();
+    // Achieved: 8.6e-4 (0.086 percent) at 32 samples per axis. At 16 it was
+    // 5.8e-3, over the limit the end to end test (scripts/e2e.sh) checks.
+    for id in [SUN, EARTH, MOON] {
+        let err = mass_error(&s, id, 1);
+        assert!(err < 0.005, "frame {id}: relative mass error {err:e}");
+    }
+}
+
+#[test]
 fn every_depth_two_cell_validates_and_empties_agree_with_keys() {
     let s = system();
     let listed = non_empty_keys(&s, EARTH, 2).unwrap();
