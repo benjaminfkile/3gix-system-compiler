@@ -8,6 +8,10 @@
 //! - [`compile`](mod@compile): one chunk key in, one validated,
 //!   deterministic section out (`matter-format.md` sections 2 to 5,
 //!   documented in `docs/compile.md`).
+//! - [`hub`]: the compiler side of the hub's protocol: configuration from
+//!   the environment, the WebSocket job channel, section submission, and
+//!   the `serve` daemon (`compiler-pipeline.md` sections 5 to 8, documented
+//!   in `docs/protocol.md`).
 //! - [`model`]: the parsed and validated contents of `data/system.toml`, the
 //!   frame registry built from it (`matter-format.md` section 5), and the
 //!   per-body matter model sampled into sections (`matter-format.md`
@@ -27,6 +31,7 @@
 
 pub mod compile;
 pub mod detmath;
+pub mod hub;
 pub mod model;
 pub mod orbit;
 pub mod rotation;
