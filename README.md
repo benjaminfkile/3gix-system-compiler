@@ -17,6 +17,40 @@ Compilers are allowed to know what things are. This one knows about a star, eigh
 - `gx-core`, the shared library: matter format encoder and validator, units, chunk keys, the frame registry.
 - The hub's compiler API: `3GIXHub/docs/architecture/compiler-pipeline.md` and `third-party-api.md`.
 
+## Layout
+
+```
+Cargo.toml                 virtual workspace
+rust-toolchain.toml        pinned Rust toolchain (1.99.0)
+data/system.toml           the only place numbers live: masses, radii, state
+                           vectors, rotation, and matter parameters, every
+                           value sourced in a comment
+crates/system-compiler/    library crate `system_compiler` and binary
+                           `system-compiler`
+  src/model.rs             System: load and validate the data, build the
+                           registry, sample the matter model
+  src/rotation.rs          IAU rotational elements to orientation and spin
+  src/orbit.rs             osculating elements from a state vector
+  src/detmath.rs           deterministic sine and cosine
+  tests/data.rs            registry, masses, periods, rotation, opacity
+  tests/integration.rs     one year of orbits with gx-core's integrator
+docs/data-sources.md       every source, request, response, and conversion
+docs/model.md              how a body becomes matter, and what is not modeled
+scripts/ci.sh              format, clippy, tests, dash check
+scripts/iau-at-epoch.py    evaluates IAU rotational elements at J2000
+```
+
+## Running
+
+```
+sh scripts/ci.sh                       # full check
+cargo run -p system-compiler           # validate the bundled data and list the frames
+cargo run -p system-compiler -- PATH   # the same for another data file
+```
+
+Compiling chunks and connecting to the hub arrive in later work; the
+environment variables in `.env.example` are for that.
+
 ## Specification
 
 - Architecture: `3GIXHub/docs/architecture/space-model.md`
