@@ -29,13 +29,19 @@ crates/system-compiler/    library crate `system_compiler` and binary
                            `system-compiler`
   src/model.rs             System: load and validate the data, build the
                            registry, sample the matter model
+  src/compile.rs           chunk key to validated, deterministic section
+  src/main.rs              CLI: compile, describe, keys, frames
   src/rotation.rs          IAU rotational elements to orientation and spin
   src/orbit.rs             osculating elements from a state vector
   src/detmath.rs           deterministic sine and cosine
   tests/data.rs            registry, masses, periods, rotation, opacity
   tests/integration.rs     one year of orbits with gx-core's integrator
+  tests/compile.rs         mass conservation, exact empty cells, key listing
+  tests/golden.rs          golden SHA-256 hashes and determinism
+  tests/golden.json        the golden hashes (see docs/compile.md)
 docs/data-sources.md       every source, request, response, and conversion
 docs/model.md              how a body becomes matter, and what is not modeled
+docs/compile.md            how a chunk key becomes bytes; golden policy
 scripts/ci.sh              format, clippy, tests, dash check
 scripts/iau-at-epoch.py    evaluates IAU rotational elements at J2000
 ```
@@ -44,12 +50,30 @@ scripts/iau-at-epoch.py    evaluates IAU rotational elements at J2000
 
 ```
 sh scripts/ci.sh                       # full check
-cargo run -p system-compiler           # validate the bundled data and list the frames
-cargo run -p system-compiler -- PATH   # the same for another data file
+
+# Compile one chunk key; bytes to a file (or stdout without --out), length
+# and SHA-256 to stderr. --no-compress leaves the sample block raw.
+cargo run -p system-compiler -- compile --data data/system.toml --key registry --out registry.bin
+cargo run -p system-compiler -- compile --data data/system.toml --key 4-2-1-1-1 --out cell.bin
+
+# Decode a compiled key with gx-core and print a JSON summary: geometry,
+# resolution, non-vacuum count, and mass, or the registry's frames.
+cargo run -p system-compiler -- describe --data data/system.toml --key registry
+cargo run -p system-compiler -- describe --data data/system.toml --key 4-2-1-1-1
+
+# Every cell key of a frame at a depth whose section is not empty, sorted.
+cargo run -p system-compiler -- keys --data data/system.toml --frame 4 --depth 2
+
+# The registry's frames with their names, for humans.
+cargo run -p system-compiler -- frames
 ```
 
-Compiling chunks and connecting to the hub arrive in later work; the
-environment variables in `.env.example` are for that.
+`--data` is optional everywhere; without it the binary uses the copy of
+`data/system.toml` baked in at build time. How a key becomes bytes, the
+resolution table, and the golden hash policy are in `docs/compile.md`.
+
+Connecting to the hub arrives in later work; the environment variables in
+`.env.example` are for that.
 
 ## Specification
 
