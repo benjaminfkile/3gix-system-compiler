@@ -148,6 +148,7 @@ dependencies = [
 [[package]]
 name = "gx-core"
 version = "0.1.0"
+source = "git+https://github.com/benjaminfkile/3gix-core?branch=grunt#cdb35838bfdd693312df3c771b8a2759512ee9fd"
 dependencies = [
  "zstd",
 ]
