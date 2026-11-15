@@ -1,21 +1,21 @@
 # Compiling a chunk
 
-`crates/system-compiler/src/compile.rs` is the pure function at the heart of the compiler: one chunk key in, one section's bytes out, with no network and no state. It implements `matter-format.md` sections 2 (chunk keys), 3 (matter sections), 4 (validation), and 5 (the frame registry).
+`crates/system-compiler/src/compile.rs` is the pure function at the heart of the module: one chunk key and origin in, one section's bytes out, with no imports and no state. It implements `matter-format.md` sections 2 (chunk keys), 3 (matter sections), 4 (validation), and 5 (the frame registry). The module's `gx_compile` export (`client-compute.md` section 4) and the native CLI both call it.
 
 ```rust
-pub fn compile(system: &System, key: &ChunkKey, opts: &CompileOptions) -> Result<Vec<u8>, CompileError>
+pub fn compile(system: &System, key: &ChunkKey, origin_utc_ms: i64, opts: &CompileOptions) -> Result<Vec<u8>, CompileError>
 ```
 
 ## Algorithm
 
-1. Key `registry`: encode `System::registry()` with `gx_core::registry::encode`.
+1. Key `registry`: encode `System::registry_at(origin_utc_ms)` with `gx_core::registry::encode`: the baked states integrated to the origin (`docs/model.md`, "The registry at the origin"). The origin is the only input that changes it. Cell sections ignore the origin: the matter never changes.
 2. Cell key whose frame id the system does not declare: `CompileError::UnknownFrame`.
 3. Cell key of the root frame: an empty section (section 3.4) with the geometry from the root's `root_extent`. The root holds no matter.
 4. Cell key of a body frame:
    1. Geometry from the frame's `root_extent` with `CellKey::geometry` (section 3.1).
    2. If the cell's depth is above the frame's `max_depth` in the registry, emit an empty section. Section 5.2 defines `max_depth` as the deepest cell the frame's compilers fill with non-empty matter, so filling deeper cells would contradict the registry this compiler publishes.
    3. If the cell cube does not intersect the ball of mean radius, emit an empty section. The test is exact: per axis the point of the cube nearest the body center is the center clamped to the cube, and the cell intersects when that point's squared distance is at most the squared radius. A cube that touches the sphere at a single point intersects (its section is non-empty, with every sample vacuum); a cube beyond the radius by any margin, even one ulp, is empty.
-   4. Otherwise take `n = resolution_by_depth[depth]` and fill the `n^3` grid in index order (x fastest). Each sample's density is `fraction * mean_density`, where `fraction` is the sub-sampled share of the sub-cube inside the ball. A sample with `fraction > 0` takes the body's state, temperature, albedo, roughness, and attenuation; a sample with `fraction = 0` is vacuum with every channel 0.
+   4. Otherwise take `n = resolution_by_depth[depth]` and fill the `n^3` grid in index order (x fastest). For a uniform body each sample's density is `fraction * mean_density`, where `fraction` is the sub-sampled share of the sub-cube inside the ball. For a polytrope each sub-sample point inside the ball contributes the profile's `theta^n` and `theta^n T` at `s = d^2 / R^2`; the density is `rho_c` times the mean of `theta^n` over the sub-cube's points and the temperature is the density-weighted mean. A sample with density above 0 takes the body's state, albedo, roughness, and attenuation; a sample with density 0 is vacuum with every channel 0.
    5. Build the section with `gx_core::matter::Section::new`, so the library's rules apply, then `gx_core::matter::encode` with the chosen compression.
 5. Run `gx_core::validate::validate(key, bytes)` on the result and return `CompileError::Invalid` if it fails. A compiler never emits bytes the hub would reject.
 
@@ -25,14 +25,14 @@ pub fn compile(system: &System, key: &ChunkKey, opts: &CompileOptions) -> Result
 
 | Depth | Samples per axis |
 |---|---|
-| 0 | 8 |
+| 0 | 32 |
 | 1 | 32 |
 | 2 | 16 |
 | 3, 4 | 32 |
 | 5 | 48 |
 | 6 and beyond | 64, the format's maximum |
 
-Every body frame has an extent of 8 mean radii. At depth 2 the cell edge is 2 radii and the eight central cells each hold one octant of the ball, which spans half of each cell along each axis: at 16 samples per axis the diameter is 16 samples (64 sub-sampling points). At depth 1 the cell edge is 4 radii and the ball spans only a quarter of each cell along each axis, so depth 1 takes 32 samples per axis to put the same 16 samples across the diameter. At 16 the summed mass at depth 1 was 0.58 percent high, over the 0.5 percent the end to end test (`scripts/e2e.sh`, `docs/e2e.md`) allows. Depth 0 stays at 8: one cell holds the whole body, and its summed mass is 4.4 percent high; no test checks it, and the registry's `mass` stays the authoritative value.
+Every body frame has an extent of 8 mean radii. At depth 2 the cell edge is 2 radii and the eight central cells each hold one octant of the ball, which spans half of each cell along each axis: at 16 samples per axis the diameter is 16 samples (64 sub-sampling points). At depth 1 the cell edge is 4 radii and the ball spans only a quarter of each cell along each axis, so depth 1 takes 32 samples per axis to put the same 16 samples across the diameter (at 16 the summed mass was 0.58 percent high). Depth 0, one cell holding the whole body and the coarsest depth that covers it, takes 32 so the ball is 8 samples across: at 8 per axis the ball was 2 samples across, the uniform balls' summed mass was 4.4 percent high and the polytropes' up to 1.0 percent off; at 32 they are 0.58 percent and 6.1e-7.
 
 ## Sub-sampling
 
@@ -44,38 +44,27 @@ coordinate_k = origin + step * (k + 0.5),   k = 0 .. 4n - 1, per axis
 
 Each sample's sub-cube holds `4 x 4 x 4 = 64` of those points, at offsets `(i + 0.5) / 4` of its edge. A point is inside when `x^2 + y^2 + z^2 <= r^2`, summed in that order, the same rule as `Body::contains`. `fraction = inside / 64`.
 
-Mass conservation (`tests/compile.rs`): the summed mass of the non-empty depth 1 cells and of the non-empty depth 2 cells of frames 1, 4, and 10 is within 0.5 percent of each frame's mass in the data file. Achieved error is 8.6e-4 (0.086 percent) at both depths for all three, identical because every frame extent is the same multiple of its radius. The sampled densities exist for rendering only; the registry's `mass` stays authoritative (section 5.2).
+Mass conservation (`tests/compile.rs`): the summed mass of the non-empty depth 1 cells and of the non-empty depth 2 cells of the uniform frames is within 0.5 percent of each frame's mass in the data file (achieved 8.6e-4). The polytropes' summed mass at depths 0, 1, and 2 is within 2 percent (achieved below 7e-6, because their density falls to 0 smoothly at the surface where the ball's edge cuts the lattice). The sampled densities exist for rendering only; the registry's `mass` stays authoritative (section 5.2).
 
 ## Determinism contract
 
 - Every value is `f64`, computed in a fixed order, then rounded once to `f32` by the library when stored.
 - Loops run on one thread in index order. No parallel iterators, no `HashMap` iteration, no system time, no randomness.
-- No transcendental functions: the compiler uses only addition, multiplication, division, and comparison, which IEEE 754 defines exactly on every platform. The registry's sines and cosines come from `detmath`.
+- No platform math library: the compiler uses addition, multiplication, division, comparison, and `sqrt`, which IEEE 754 defines exactly on every platform. The IAU elements' sines and cosines come from `detmath`; the integrator uses the library's own deterministic functions (core `docs/determinism.md`).
 - Compression is zstd at the level fixed by gx-core, with the zstd crate version pinned by gx-core.
-- The tests check that the golden keys compile to identical bytes twice in one process and once in a fresh process through the binary, and that debug and release builds agree (the golden file is produced by the test build and matches the release binary's output).
+- The module is built for `wasm32-unknown-unknown` without relaxed SIMD or threads, and has no imports.
 
-## Golden policy
+## Conformance policy
 
-`crates/system-compiler/tests/golden.json` stores the SHA-256 of the compiled bytes, with default options, of:
+`conformance/` holds twelve request vectors (`NAME.request.bin`, `NAME.tiles.bin`, `NAME.sha256`) and `index.json` saying what each covers: the registry at two origins (2026-11-14T00:00:00Z and 2026-11-15T12:00:00Z), whole and partial cells of the plasma body, solid bodies, and gas bodies at depths 0 to 6, a root cell, and an empty cell. Each hash is a promise about the bytes every client computes and uploads.
 
-| Key | What it covers |
-|---|---|
-| `registry` | the frame registry |
-| `4-0-0-0-0` | frame 4 at depth 0, the whole body |
-| `4-2-1-1-1` | frame 4 at depth 2, a cell holding part of the surface |
-| `1-1-0-0-0` | frame 1 at depth 1 |
-| `10-3-3-3-3` | frame 10 at depth 3 |
-| `6-2-0-0-0` | frame 6 at depth 2, a far corner cell that is empty |
-| `0-0-0-0-0` | a root frame cell |
+- `tests/conformance.rs` regenerates the vectors natively through the module's own entry point and requires every checked-in file to match byte for byte.
+- `scripts/ci.sh` builds the WebAssembly module and runs the core library's determinism harness on it: every vector through the native module host (wasmtime) and through Node's WebAssembly, both required to give the checked-in hash.
 
-A hash is a promise about what the hub stores. Any change to `data/system.toml`, the resolution table, the sub-sampling scheme, the compression, or the gx-core version (including a `Cargo.lock` update that moves it) that changes a hash is a golden change and must be reviewed as one. To regenerate:
+Any change to `data/system.toml`, the resolution table, the sub-sampling scheme, the polytrope tables, the integration step, the compression, or the gx-core version (including a `Cargo.lock` update that moves it) that changes a hash is a conformance change and must be reviewed as one. It is also a new module hash: the layer must be published again (`scripts/publish.sh`). To regenerate:
 
 ```
-UPDATE_GOLDEN=1 cargo test -p system-compiler --test golden
+cargo run -p system-compiler --release -- conformance --out conformance
 ```
 
-Then commit the diff of `golden.json` in the same change as its cause, saying why the bytes changed.
-
-Golden changes so far:
-
-- `1-1-0-0-0`: depth 1 went from 16 to 32 samples per axis so that the summed mass of the depth 1 cells is within 0.5 percent of each frame's mass (0.086 percent, was 0.58). No other key changed.
+Then commit the diff of `conformance/` in the same change as its cause, saying why the bytes changed.

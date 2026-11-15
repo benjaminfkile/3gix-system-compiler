@@ -5,3 +5,11 @@ members = ["crates/system-compiler"]
 [workspace.package]
 edition = "2021"
 publish = false
+
+# The registry integrates 27 years of orbits; unoptimized, the tests would
+# take many minutes. Optimize the library (and everything) in test builds.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 2
