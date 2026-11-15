@@ -303,10 +303,14 @@ fn polytrope_temperatures() {
     let s = system();
     let sun = s.body(SUN).unwrap();
     let r = sun.mean_radius.value();
-    // Central temperature at the center, the effective temperature at the
-    // edge.
+    // Central temperature at the center; at the edge the Eddington
+    // atmosphere's T_eff (1/2)^(1/4), optical depth 0.
     assert!((sun.temperature_at_radius(0.0).value() / 1.571e7 - 1.0).abs() < 1e-9);
-    assert_eq!(sun.temperature_at_radius(r).value(), 5772.0);
+    let top = 5772.0 * 0.5f64.sqrt().sqrt();
+    assert!((sun.temperature_at_radius(r).value() / top - 1.0).abs() < 1e-12);
+    // The attenuation comes from the photosphere condition.
+    let kappa = sun.matter.attenuation.value();
+    assert!(kappa > 0.0);
     let t1bar = [(6, 165.0), (7, 134.0), (8, 76.0), (9, 72.0)];
     for (id, t) in t1bar {
         let b = s.body(id).unwrap();

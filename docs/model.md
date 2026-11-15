@@ -129,10 +129,16 @@ the body's volume):
   cloud deck, 0.4 for the giant planets' cloud tops, 1.0 for the Sun.
 - **Attenuation**: the mass attenuation coefficient. It is 0 for solid
   bodies, whose surface is the boundary of the ball. For gas and plasma
-  bodies it is chosen so the body is opaque within a small fraction of its
-  radius: the optical depth from the surface down through one percent of
-  the radius, integrated through the polytropic density, is at least 10.
-  A test asserts the inequality for every gas and plasma body.
+  bodies it is derived, never stated in the data: the photosphere
+  condition puts optical depth 2/3 (integrated from the surface through
+  the polytropic density) at the level whose temperature is the body's
+  published one: the effective temperature for the plasma body, the 1 bar
+  level for the gas bodies (below). Measured: 0.807 m^2/kg for the Sun,
+  1.7e-4 for Jupiter, 7.5e-5 for Saturn and Neptune, 6.0e-5 for Uranus.
+  Each is opaque within one percent of its radius (a test asserts optical
+  depth 10 or more there).
+- **Radiating temperature**: what the sample shows to the outside
+  (`matter-format.md` section 3.3), below.
 
 `System::density_at` and `System::sample_at` evaluate this model at a point
 in a frame; the chunk compiler samples them into cells (`docs/compile.md`).
@@ -173,11 +179,16 @@ at the outer edge, at 0.999 R, is below 1 percent of the mean.
 The ideal-gas polytropic relation is `T ~ P / rho ~ theta`. It is scaled to
 one published temperature per body:
 
-- **Plasma body (index 3)**: `T = max(T_c theta, T_eff)`, with the published
-  central temperature `T_c = 1.571e7 K` and the effective temperature
-  `T_eff = 5772 K` as a floor. The floor keeps the outer layers at the
-  photosphere's temperature rather than letting them fall to 0 at the
-  surface, which no real photosphere does.
+- **Plasma body (index 3)**: `T = max(T_c theta, T_atm)`, with the
+  published central temperature `T_c = 1.571e7 K` and the gray Eddington
+  atmosphere `T_atm^4 = (3/4) T_eff^4 (tau + 2/3)` of the effective
+  temperature `T_eff = 5772 K`, `tau` the optical depth from the surface.
+  The photosphere condition (above) makes the two meet at `tau = 2/3`,
+  where both are `T_eff`: the interior below, the atmosphere above, falling
+  to `T_eff (1/2)^(1/4) = 4854 K` at the surface. Radiation leaving such an
+  atmosphere carries `sigma T_eff^4`; in the three visible bands it is 1.2
+  times `pi B(T_eff)` (`tests/light.rs`), because the deeper layers it
+  shows are hotter.
 - **Gas bodies (index 1)**: the published temperature at the 1 bar level is
   held at that level of the model. For index 1, `K = 2 pi G alpha^2`, so the
   model's own pressure `P = K rho_c^2 theta^2` gives the `theta_ref` where
@@ -191,6 +202,29 @@ temperatures are model results with large spreads. The central temperature
 is used for the plasma body because that is its published value and its
 1 bar level is not meaningful. Each sample's temperature is the
 density-weighted mean over its sub-sample points.
+
+### Radiating temperature
+
+A sample's `temperature` is the mean of everything it holds; light leaves
+only from about one optical depth below its outer side. A coarse sample at
+the edge of the Sun holds matter at hundreds of thousands of kelvin but
+shows only its photosphere. So each sample also carries the radiating
+temperature (`src/polytrope.rs`, "Radiating temperature"): the radiance
+`G(r)` that leaves radius `r` outward from the matter below it is
+tabulated from the depth of optical depth 60 to the surface by the formal
+solution of the transfer equation along the radius; a sample spanning radii
+`r_in` to `r_out` (its sub-cube's nearest and farthest points from the
+center) with optical thickness `dtau` sends out
+`(G(r_out) - e^-dtau G(r_in)) / (1 - e^-dtau)`, and its radiating
+temperature is the blackbody temperature of that radiance summed over the
+three bands. Uniform bodies have it equal to their temperature.
+
+Measured through the library's emission law on the depth-0 sections
+(`tests/light.rs`): the Sun sends out 2.0 times `4 pi R^2 pi B(T_eff)` in
+the visible bands, the atmosphere's 1.2 times the depth-0 grid's coarse
+outline (eight samples across the ball cover more than its disc); a whole
+Sun section at 64 samples across gives 1.72. No planet sends out any
+light at 1000 K or above.
 
 ## Deliberately not modeled
 

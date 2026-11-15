@@ -21,7 +21,7 @@ polynomials, giant planet barycenter states, and the check vectors at the
 | `temperature_k` | NASA NSSDCA fact sheets: black-body temperature for solid bodies, temperature at 1 bar for gas bodies; Horizons for the Sun's effective temperature | none |
 | `central_temperature_k`, `polytropic_index` | NASA NSSDCA Sun fact sheet; the index is the brief's (1 gas, 3 plasma) | none |
 | `albedo` | NASA NSSDCA fact sheets, geometric albedo, tinted per band | see "Albedo bands" |
-| `roughness`, `attenuation_m2_per_kg` | chosen model parameters, see `docs/model.md` | none |
+| `roughness`, `attenuation_m2_per_kg` | chosen model parameters, see `docs/model.md`; `attenuation_m2_per_kg` only for solid bodies, a polytrope's is derived | none |
 | `root_extent_m`, `max_depth` | chosen frame layout | `8 * mean_radius_m`; 6 |
 
 `G = 6.67430e-11 m^3 kg^-1 s^-2` (CODATA 2018) is the value of
@@ -571,8 +571,8 @@ the fact sheets' temperature at the 1 bar level instead (`docs/model.md`,
 | Neptune | 72 |
 
 The Sun's 5772 K is the IAU 2015 nominal effective temperature, quoted in
-the Horizons physical data block for target 10 above; it is the floor of
-the Sun's polytrope. Its central temperature, 1.571e7 K, is from the NSSDCA
+the Horizons physical data block for target 10 above; it is the effective
+temperature of the Sun's Eddington atmosphere. Its central temperature, 1.571e7 K, is from the NSSDCA
 Sun fact sheet.
 
 ### Albedo bands

@@ -180,6 +180,10 @@ pub fn intersects(body: &Body, g: &CellGeometry) -> bool {
 ///   `theta^n T` at `s = d^2 / r^2` (linear interpolation in the table, no
 ///   square root); density is `rho_c * sum(theta^n) / SUBSAMPLES^3` and
 ///   temperature the density-weighted mean `sum(theta^n T) / sum(theta^n)`.
+///   The radiating temperature is the profile's for the radial span of the
+///   sub-cube, from its nearest to its farthest point
+///   ([`crate::polytrope::Profile::radiating_temperature`]).
+/// - Uniform body: the radiating temperature is the temperature.
 ///
 /// A sample with density above 0 takes the body's state, albedo,
 /// roughness, and attenuation; one with density 0 is vacuum with every
@@ -247,15 +251,42 @@ pub fn sample_cell(body: &Body, g: &CellGeometry, n: u8) -> Samples {
                 if phi <= 0.0 {
                     Sample::VACUUM
                 } else {
+                    let (r_in, r_out) = radial_span(g, n, x, y, z);
                     Sample {
                         density: Density::new(profile.central_density() * phi / total),
                         temperature: Kelvin::new(phi_t / phi),
+                        radiating_temperature: Kelvin::new(
+                            profile.radiating_temperature(r_in, r_out),
+                        ),
                         ..full
                     }
                 }
             }
         }
     })
+}
+
+/// The nearest and farthest distance from the frame origin of the sub-cube
+/// of sample `(x, y, z)` of a cell of `n` samples per axis, meters.
+fn radial_span(g: &CellGeometry, n: u8, x: u32, y: u32, z: u32) -> (f64, f64) {
+    let e = g.edge.value() / f64::from(n);
+    let axis = |origin: f64, i: u32| -> (f64, f64) {
+        let lo = origin + e * f64::from(i);
+        let hi = lo + e;
+        let near = if lo > 0.0 {
+            lo
+        } else if hi < 0.0 {
+            -hi
+        } else {
+            0.0
+        };
+        let far = if -lo > hi { -lo } else { hi };
+        (near * near, far * far)
+    };
+    let (nx, fx) = axis(g.origin.x, x);
+    let (ny, fy) = axis(g.origin.y, y);
+    let (nz, fz) = axis(g.origin.z, z);
+    ((nx + ny + nz).sqrt(), (fx + fy + fz).sqrt())
 }
 
 /// Every cell key of a frame at one depth whose section is not empty,

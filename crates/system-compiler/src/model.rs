@@ -129,8 +129,8 @@ pub struct Matter {
     /// State of the matter; never vacuum.
     pub state: State,
     /// Temperature: the uniform temperature of a solid body, the 1 bar
-    /// temperature of a gas body, and the outer-layer floor of a plasma
-    /// body.
+    /// temperature of a gas body, and the effective (photosphere)
+    /// temperature of a plasma body.
     pub temperature: Kelvin,
     /// Temperature at the center of a polytrope scaled to a central
     /// temperature (the plasma body); `None` otherwise.
@@ -140,7 +140,8 @@ pub struct Matter {
     pub albedo: [Ratio; 3],
     /// Microfacet roughness.
     pub roughness: Ratio,
-    /// Mass attenuation coefficient; 0 for a hard surface.
+    /// Mass attenuation coefficient; 0 for a hard surface. For a polytrope,
+    /// the value set by the photosphere condition.
     pub attenuation: Attenuation,
 }
 
@@ -263,6 +264,7 @@ impl Body {
             albedo: self.matter.albedo,
             roughness: self.matter.roughness,
             attenuation: self.matter.attenuation,
+            radiating_temperature: self.matter.temperature,
         }
     }
 
@@ -512,7 +514,7 @@ struct RawBody {
     central_temperature_k: Option<f64>,
     albedo: [f64; 3],
     roughness: f64,
-    attenuation_m2_per_kg: f64,
+    attenuation_m2_per_kg: Option<f64>,
     root_extent_m: f64,
     max_depth: u8,
 }
@@ -695,7 +697,25 @@ fn body_from_raw(b: RawBody, solutions: &[LaneEmden]) -> Result<Body> {
     c.non_negative("temperature_k", b.temperature_k)?;
     b.albedo.iter().try_for_each(|&a| c.unit("albedo", a))?;
     c.unit("roughness", b.roughness)?;
-    c.non_negative("attenuation_m2_per_kg", b.attenuation_m2_per_kg)?;
+    // A polytrope takes its attenuation from the photosphere condition
+    // (docs/model.md, "Temperature"); every other body states it.
+    match b.attenuation_m2_per_kg {
+        Some(a) => {
+            c.non_negative("attenuation_m2_per_kg", a)?;
+            c.check(
+                "attenuation_m2_per_kg",
+                a,
+                b.polytropic_index.is_none(),
+                "is derived for a polytrope and must not be given",
+            )?;
+        }
+        None => c.check(
+            "attenuation_m2_per_kg",
+            f64::NAN,
+            b.polytropic_index.is_some(),
+            "must be given unless the body is a polytrope",
+        )?,
+    }
     c.positive("root_extent_m", b.root_extent_m)?;
     c.check(
         "root_extent_m",
@@ -738,7 +758,7 @@ fn body_from_raw(b: RawBody, solutions: &[LaneEmden]) -> Result<Body> {
             let thermal = match b.central_temperature_k {
                 Some(central) => Thermal::Central {
                     central,
-                    floor: b.temperature_k,
+                    effective: b.temperature_k,
                 },
                 None => Thermal::Reference {
                     pressure: REFERENCE_PRESSURE_PA,
@@ -750,10 +770,17 @@ fn body_from_raw(b: RawBody, solutions: &[LaneEmden]) -> Result<Body> {
                     frame_id: b.frame_id,
                     source,
                 })?;
+
             Structure::Polytrope(profile)
         }
     };
 
+    let attenuation = match &structure {
+        Structure::Polytrope(p) => Some(p.attenuation()),
+        Structure::Uniform => None,
+    }
+    .or(b.attenuation_m2_per_kg)
+    .unwrap_or(0.0);
     let [px, py, pz] = b.position_m;
     let [vx, vy, vz] = b.velocity_m_per_s;
     let [ma, mb, mc] = b.principal_moments_kg_m2;
@@ -790,7 +817,7 @@ fn body_from_raw(b: RawBody, solutions: &[LaneEmden]) -> Result<Body> {
             central_temperature: b.central_temperature_k.map(Kelvin::new),
             albedo: b.albedo.map(Ratio::new),
             roughness: Ratio::new(b.roughness),
-            attenuation: Attenuation::new(b.attenuation_m2_per_kg),
+            attenuation: Attenuation::new(attenuation),
         },
         structure,
         root_extent: Meters::new(b.root_extent_m),
@@ -846,6 +873,7 @@ max_depth = 6
             .replacen("mass_kg = 1.0e24", "mass_kg = 1.0e27", 1)
             .replacen("mean_radius_m = 1.0e6", "mean_radius_m = 7.0e7", 1)
             .replacen("root_extent_m = 8.0e6", "root_extent_m = 5.6e8", 1)
+            .replacen("attenuation_m2_per_kg = 0.0\n", "", 1)
     }
 
     #[test]
@@ -914,6 +942,17 @@ max_depth = 6
         let mid = s.sample_at(1, Vec3::new(3.5e7, 0.0, 0.0));
         assert_eq!(mid.state, State::Gas);
         assert!(mid.temperature.value() >= 250.0);
+        // The attenuation is derived, and a gas body may not state one.
+        assert!(b.matter.attenuation.value() > 0.0);
+        let stated = gas().replacen(
+            "roughness = 0.5",
+            "roughness = 0.5\nattenuation_m2_per_kg = 1.0",
+            1,
+        );
+        assert!(stated.parse::<System>().is_err());
+        // A solid body must state one.
+        let missing = MINIMAL.replacen("attenuation_m2_per_kg = 0.0\n", "", 1);
+        assert!(missing.parse::<System>().is_err());
     }
 
     #[test]

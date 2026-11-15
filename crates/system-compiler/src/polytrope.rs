@@ -25,18 +25,154 @@
 //! uniform in `s = (r / R)^2` (so a sample point needs no square root) and
 //! reads it back by linear interpolation.
 //!
-//! Only `+`, `-`, `*`, `/`, and `sqrt` are used, in a fixed order, so every
-//! value is bitwise identical on every machine.
+//! # The atmosphere of a plasma body
+//!
+//! A body whose temperature is set from its center ([`Thermal::Central`])
+//! radiates through an atmosphere. Its temperature is the larger of the
+//! polytropic `T_c theta` and the gray Eddington atmosphere
+//!
+//! ```text
+//! T^4 = (3/4) T_eff^4 (tau + 2/3),
+//! ```
+//!
+//! where `tau = kappa * column` is the optical depth from the surface and
+//! `column(r) = integral from r to R of rho dr'`. The mass attenuation
+//! coefficient `kappa` is set by the photosphere condition: the layer where
+//! the polytropic temperature equals the effective temperature sits at
+//! `tau = 2/3`, where the Eddington atmosphere has `T = T_eff`. So the
+//! interior and the atmosphere meet at the photosphere, and the radiation
+//! leaving the surface carries the flux `sigma T_eff^4`.
+//!
+//! A body whose temperature is set at a reference level
+//! ([`Thermal::Reference`]) has its photosphere at that level: `kappa` puts
+//! optical depth 2/3 there, so it radiates at the reference temperature. The column is
+//! integrated by Simpson's rule, [`COLUMN_STEPS`] sub-steps per table
+//! interval and [`PHOTOSPHERE_STEPS`] from the photosphere out.
+//!
+//! # Radiating temperature
+//!
+//! A sample's radiating temperature (`matter-format.md` section 3.3) is
+//! what its matter sends out of its outer side. For a spherical body the
+//! radiance leaving radius `r` outward, from everything below it, is
+//!
+//! ```text
+//! G(r) = integral from tau(r) to infinity of B(T(tau')) e^-(tau' - tau(r)) dtau',
+//! ```
+//!
+//! the formal solution of the transfer equation along the radius, `B` the
+//! blackbody radiance summed over the three bands. [`Profile::set_radiation`]
+//! tabulates `G` on [`ATMOSPHERE_STEPS`] intervals uniform in `r` from the
+//! depth where the optical depth from the surface reaches [`DEEP_TAU`] up to
+//! the surface, stepping the recurrence
+//! `G(r + dr) = G(r) e^-dtau + B(T_mid) (1 - e^-dtau)` outward; below that
+//! depth `G(r) = B(T(r))`. A sample whose matter spans radii `r_in` to
+//! `r_out` with optical thickness `dtau` between them sends out
+//! `(G(r_out) - e^-dtau G(r_in)) / (1 - e^-dtau)`, and its radiating
+//! temperature is the temperature whose summed band radiance equals that
+//! ([`Profile::radiating_temperature`]). A uniform sample (`dtau` near 0)
+//! gets its own temperature.
+//!
+//! Only `+`, `-`, `*`, `/`, `sqrt`, and the deterministic
+//! `gx_core::detmath::exp` (in `G` and in the band radiance) are used, in a
+//! fixed order, so every value is bitwise identical on every machine.
 
 use core::f64::consts::PI;
 
+use std::sync::OnceLock;
+
+use gx_core::detmath::exp;
 use gx_core::gravity::G;
+use gx_core::radiance::band_radiance;
+use gx_core::units::Kelvin;
 
 /// The Runge-Kutta step in `xi`.
 pub const XI_STEP: f64 = 1.0 / 2048.0;
 
 /// Intervals of the profile table in `s = (r / R)^2`.
 pub const TABLE_LEN: usize = 4096;
+
+/// Simpson sub-steps of the column integral per table interval (even).
+pub const COLUMN_STEPS: usize = 8;
+
+/// Simpson sub-steps of the column integral from the photosphere to the
+/// surface (even).
+pub const PHOTOSPHERE_STEPS: usize = 4096;
+
+/// Optical depth of the photosphere in the Eddington atmosphere.
+pub const PHOTOSPHERE_TAU: f64 = 2.0 / 3.0;
+
+/// Intervals of the radiation table from [`DEEP_TAU`] to the surface.
+pub const ATMOSPHERE_STEPS: usize = 4096;
+
+/// Optical depth below which the radiation table starts: deeper matter
+/// sends out its own blackbody radiance, `e^-DEEP_TAU` of what lies below
+/// it reaching the top.
+pub const DEEP_TAU: f64 = 60.0;
+
+/// Points of the blackbody inversion table, uniform in `T^(1/4)`.
+const INVERSE_POINTS: usize = 16384;
+
+/// Largest `T^(1/4)` of the inversion table: 128, so `T` up to 2.7e8 K.
+const INVERSE_TOP: f64 = 128.0;
+
+/// Summed band radiance at `u^4` for `u = INVERSE_TOP * k / (INVERSE_POINTS
+/// - 1)`, increasing in `k`.
+fn inverse_table() -> &'static [f64] {
+    static TABLE: OnceLock<Vec<f64>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        (0..INVERSE_POINTS)
+            .map(|k| {
+                let u = INVERSE_TOP * k as f64 / (INVERSE_POINTS - 1) as f64;
+                radiance_sum(u * u * u * u)
+            })
+            .collect()
+    })
+}
+
+/// Blackbody radiance summed over the three bands, W m^-2 sr^-1.
+fn radiance_sum(t: f64) -> f64 {
+    let b = band_radiance(Kelvin::new(t));
+    b[0] + b[1] + b[2]
+}
+
+/// The temperature whose summed band radiance is `b`: binary search in the
+/// inversion table and linear interpolation in `T^(1/4)`.
+fn temperature_of_radiance(b: f64) -> f64 {
+    let t = inverse_table();
+    if b.is_nan() || b <= 0.0 {
+        return 0.0;
+    }
+    let (mut lo, mut hi) = (0usize, INVERSE_POINTS - 1);
+    if b >= t[hi] {
+        return INVERSE_TOP * INVERSE_TOP * INVERSE_TOP * INVERSE_TOP;
+    }
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        if t[mid] <= b {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let f = (b - t[lo]) / (t[hi] - t[lo]);
+    let du = INVERSE_TOP / (INVERSE_POINTS - 1) as f64;
+    let u = (lo as f64 + f) * du;
+    u * u * u * u
+}
+
+/// The radiation table of one profile (module docs).
+#[derive(Clone, Debug, PartialEq)]
+struct Radiation {
+    kappa: f64,
+    /// Inner radius of the table, meters.
+    r0: f64,
+    /// Interval, meters.
+    dr: f64,
+    /// Column density to the surface at each table radius, kg/m^2.
+    column: Vec<f64>,
+    /// `G` at each table radius.
+    outgoing: Vec<f64>,
+}
 
 /// The supported polytropic indices: 1 for the gas bodies, 3 for the plasma
 /// body (`space-model.md` section 11 item 1).
@@ -171,14 +307,17 @@ impl LaneEmden {
 /// How a polytrope's temperature is set (`docs/model.md`, "Temperature").
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Thermal {
-    /// `T = max(T_c theta, floor)`: the ideal-gas polytropic relation
-    /// `T ~ P / rho ~ theta` scaled to a central temperature, held at a
-    /// floor (the photosphere's effective temperature) in the outer layers.
+    /// `T = max(T_c theta, T_eddington(tau))`: the ideal-gas polytropic
+    /// relation `T ~ P / rho ~ theta` scaled to a central temperature, under
+    /// a gray Eddington atmosphere of the effective temperature (module
+    /// docs). The mass attenuation coefficient follows from the
+    /// photosphere condition.
     Central {
         /// Temperature at the center, kelvin.
         central: f64,
-        /// Lowest temperature anywhere inside, kelvin.
-        floor: f64,
+        /// Effective temperature, kelvin: the temperature at the
+        /// photosphere, optical depth 2/3.
+        effective: f64,
     },
     /// `T = T_ref max(1, theta / theta_ref)`: the same relation scaled so
     /// that the level where the model's own pressure is `pressure` has the
@@ -204,6 +343,14 @@ pub struct Profile {
     /// `theta` at the reference level, for [`Thermal::Reference`]; 1 for
     /// [`Thermal::Central`].
     reference_theta: f64,
+    /// The mass attenuation coefficient set by the photosphere condition,
+    /// m^2/kg.
+    attenuation: Option<f64>,
+    /// Temperature at the surface, kelvin.
+    surface_temperature: f64,
+    /// Column density from each table point to the surface, kg/m^2.
+    column: Vec<f64>,
+    radiation: Option<Radiation>,
     xi1: f64,
 }
 
@@ -214,6 +361,20 @@ pub enum ProfileError {
     /// has no closed form for it (only index 1 does).
     #[error("the reference level is not inside the body: {0}")]
     Reference(&'static str),
+    /// The effective temperature is not between 0 and the central one.
+    #[error("the effective temperature must be above 0 and below the central temperature")]
+    Effective,
+}
+
+/// Simpson's rule for `f` over `[a, b]` in `steps` (even) sub-steps.
+fn simpson(f: &impl Fn(f64) -> f64, a: f64, b: f64, steps: usize) -> f64 {
+    let h = (b - a) / steps as f64;
+    let mut sum = f(a) + f(b);
+    for k in 1..steps {
+        let w = if k % 2 == 1 { 4.0 } else { 2.0 };
+        sum += w * f(a + k as f64 * h);
+    }
+    sum * h / 3.0
 }
 
 /// Linear interpolation in a table uniform in `s` over `[0, 1]`.
@@ -260,9 +421,67 @@ impl Profile {
                 theta
             }
         };
-        let temperature = |theta: f64| -> f64 {
+        let theta_at = |j: usize| -> f64 {
+            if j == TABLE_LEN {
+                0.0
+            } else {
+                le.theta(le.xi1() * (j as f64 / TABLE_LEN as f64).sqrt())
+            }
+        };
+        // Column density from each table point to the surface, kg/m^2, and
+        // the attenuation from the photosphere condition (module docs).
+        let rho = |r: f64| rho_c * power(le.theta(le.xi1() * r / radius), n);
+        let r_at = |j: usize| radius * (j as f64 / TABLE_LEN as f64).sqrt();
+        let mut column = vec![0.0f64; TABLE_LEN + 1];
+        for j in (0..TABLE_LEN).rev() {
+            column[j] = column[j + 1] + simpson(&rho, r_at(j), r_at(j + 1), COLUMN_STEPS);
+        }
+        let attenuation = match thermal {
+            Thermal::Central { central, effective } => {
+                let theta_eff = effective / central;
+                if !(theta_eff > 0.0 && theta_eff < 1.0) {
+                    return Err(ProfileError::Effective);
+                }
+                // theta falls monotonically outward: bisect for the
+                // photosphere's radius.
+                let (mut lo, mut hi) = (0.0f64, radius);
+                for _ in 0..64 {
+                    let mid = 0.5 * (lo + hi);
+                    if le.theta(le.xi1() * mid / radius) > theta_eff {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                let r_eff = 0.5 * (lo + hi);
+                let col = simpson(&rho, r_eff, radius, PHOTOSPHERE_STEPS);
+                Some(PHOTOSPHERE_TAU / col)
+            }
+            Thermal::Reference { .. } => {
+                // The photosphere is the reference level: theta =
+                // reference_theta, found by bisection like the effective
+                // level above.
+                let (mut lo, mut hi) = (0.0f64, radius);
+                for _ in 0..64 {
+                    let mid = 0.5 * (lo + hi);
+                    if le.theta(le.xi1() * mid / radius) > reference_theta {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                let r_ref = 0.5 * (lo + hi);
+                let col = simpson(&rho, r_ref, radius, PHOTOSPHERE_STEPS);
+                Some(PHOTOSPHERE_TAU / col)
+            }
+        };
+        let temperature = |theta: f64, column: f64| -> f64 {
             match thermal {
-                Thermal::Central { central, floor } => (central * theta).max(floor),
+                Thermal::Central { central, effective } => {
+                    let tau = attenuation.unwrap_or(0.0) * column;
+                    let t4 = 0.75 * (tau + PHOTOSPHERE_TAU);
+                    (central * theta).max(effective * t4.sqrt().sqrt())
+                }
                 Thermal::Reference { temperature, .. } => {
                     temperature * (theta / reference_theta).max(1.0)
                 }
@@ -270,25 +489,129 @@ impl Profile {
         };
         let mut density_factor = Vec::with_capacity(TABLE_LEN + 1);
         let mut weighted_temperature = Vec::with_capacity(TABLE_LEN + 1);
-        for j in 0..=TABLE_LEN {
-            let s = j as f64 / TABLE_LEN as f64;
-            let theta = if j == TABLE_LEN {
-                0.0
-            } else {
-                le.theta(le.xi1() * s.sqrt())
-            };
+        let mut surface_temperature = 0.0;
+        let column_table = column.clone();
+        for (j, &col) in column.iter().enumerate() {
+            let theta = theta_at(j);
             let phi = power(theta, n);
             density_factor.push(phi);
-            weighted_temperature.push(phi * temperature(theta));
+            weighted_temperature.push(phi * temperature(theta, col));
+            if j == TABLE_LEN {
+                surface_temperature = temperature(theta, col);
+            }
         }
-        Ok(Profile {
+        let mut profile = Profile {
             radius,
             central_density: rho_c,
             density_factor,
             weighted_temperature,
             reference_theta,
+            attenuation,
+            surface_temperature,
+            column: column_table,
+            radiation: None,
             xi1: le.xi1(),
-        })
+        };
+        if let Some(kappa) = attenuation {
+            profile.set_radiation(le, kappa);
+        }
+        Ok(profile)
+    }
+
+    /// Builds the radiation table for the mass attenuation coefficient
+    /// `kappa` (module docs); [`Profile::new`] calls it with the derived
+    /// coefficient. With `kappa` 0 there is no table and every radiating
+    /// temperature is the temperature at the middle of the span.
+    fn set_radiation(&mut self, le: &LaneEmden, kappa: f64) {
+        if kappa.is_nan() || kappa <= 0.0 {
+            self.radiation = None;
+            return;
+        }
+        let radius = self.radius;
+        let n = le.index();
+        let rho_c = self.central_density;
+        let rho = |r: f64| rho_c * power(le.theta(le.xi1() * r / radius), n);
+        // The deepest table radius: where kappa * column reaches DEEP_TAU,
+        // bisected on the column table (column falls outward).
+        let deep = DEEP_TAU / kappa;
+        let r0 = if self.column[0] <= deep {
+            0.0
+        } else {
+            let (mut lo, mut hi) = (0usize, TABLE_LEN);
+            while hi - lo > 1 {
+                let mid = (lo + hi) / 2;
+                if self.column[mid] > deep {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            radius * (lo as f64 / TABLE_LEN as f64).sqrt()
+        };
+        let dr = (radius - r0) / ATMOSPHERE_STEPS as f64;
+        let r_at = |k: usize| {
+            if k == ATMOSPHERE_STEPS {
+                radius
+            } else {
+                r0 + k as f64 * dr
+            }
+        };
+        let mut column = vec![0.0f64; ATMOSPHERE_STEPS + 1];
+        for k in (0..ATMOSPHERE_STEPS).rev() {
+            column[k] = column[k + 1] + simpson(&rho, r_at(k), r_at(k + 1), COLUMN_STEPS);
+        }
+        let mut outgoing = Vec::with_capacity(ATMOSPHERE_STEPS + 1);
+        let mut g = radiance_sum(self.temperature_at(r0));
+        outgoing.push(g);
+        for k in 0..ATMOSPHERE_STEPS {
+            let dtau = kappa * (column[k] - column[k + 1]);
+            let through = exp(-dtau);
+            let mid = 0.5 * (r_at(k) + r_at(k + 1));
+            g = g * through + radiance_sum(self.temperature_at(mid)) * (1.0 - through);
+            outgoing.push(g);
+        }
+        self.radiation = Some(Radiation {
+            kappa,
+            r0,
+            dr,
+            column,
+            outgoing,
+        });
+    }
+
+    /// The radiating temperature of matter spanning radii `r_in` to
+    /// `r_out` (meters from the center, `r_out` clamped to the surface),
+    /// kelvin (module docs). Without a radiation table it is the
+    /// temperature at the middle of the span.
+    pub fn radiating_temperature(&self, r_in: f64, r_out: f64) -> f64 {
+        let r_out = r_out.min(self.radius);
+        let r_in = r_in.min(r_out);
+        let Some(rad) = &self.radiation else {
+            return self.temperature_at(0.5 * (r_in + r_out));
+        };
+        if r_out <= rad.r0 {
+            return self.temperature_at(r_out);
+        }
+        // Linear interpolation in the table.
+        let at = |table: &[f64], r: f64| -> f64 {
+            let u = (r - rad.r0) / rad.dr;
+            let k = (u as usize).min(ATMOSPHERE_STEPS - 1);
+            let f = u - k as f64;
+            table[k] + f * (table[k + 1] - table[k])
+        };
+        let g_out = at(&rad.outgoing, r_out);
+        let tau_out = rad.kappa * at(&rad.column, r_out);
+        let b = if r_in <= rad.r0 {
+            g_out
+        } else {
+            let dtau = rad.kappa * at(&rad.column, r_in) - tau_out;
+            if dtau < 1e-9 {
+                return self.temperature_at(0.5 * (r_in + r_out));
+            }
+            let through = exp(-dtau);
+            (g_out - through * at(&rad.outgoing, r_in)) / (1.0 - through)
+        };
+        temperature_of_radiance(b)
     }
 
     /// The body's mean radius, meters: the surface of the profile.
@@ -299,6 +622,14 @@ impl Profile {
     /// Central density, kilograms per cubic meter.
     pub fn central_density(&self) -> f64 {
         self.central_density
+    }
+
+    /// The mass attenuation coefficient set by the photosphere condition,
+    /// m^2/kg: optical depth 2/3 at the effective temperature level
+    /// ([`Thermal::Central`]) or at the reference level
+    /// ([`Thermal::Reference`]).
+    pub fn attenuation(&self) -> f64 {
+        self.attenuation.unwrap_or(0.0)
     }
 
     /// `theta` at the reference level of [`Thermal::Reference`], 1 for
@@ -346,12 +677,19 @@ impl Profile {
     }
 
     /// Temperature at distance `r` from the center inside the body, kelvin.
-    /// At the surface, where the density is 0, it is the limit from inside
-    /// of the last table interval.
+    /// Inside the last table interval, where the density falls to 0 at the
+    /// surface, it is interpolated linearly in `s` between the temperature
+    /// at the interval's inner end and the surface temperature.
     pub fn temperature_at(&self, r: f64) -> f64 {
         let x = r / self.radius;
-        let s = (x * x).min(1.0 - 1.0 / TABLE_LEN as f64);
-        self.weighted_temperature(s) / self.density_factor(s)
+        let s = x * x;
+        let last = 1.0 - 1.0 / TABLE_LEN as f64;
+        if s < last {
+            return self.weighted_temperature(s) / self.density_factor(s);
+        }
+        let inner = self.weighted_temperature(last) / self.density_factor(last);
+        let f = ((s - last) * TABLE_LEN as f64).min(1.0);
+        inner + f * (self.surface_temperature - inner)
     }
 
     /// `xi_1` of the underlying solution.
@@ -399,7 +737,7 @@ mod tests {
             let le = LaneEmden::solve(n);
             let thermal = Thermal::Central {
                 central: 1e7,
-                floor: 5e3,
+                effective: 5e3,
             };
             let p = Profile::new(&le, 2.0e30, 7.0e8, thermal).unwrap();
             // Midpoint rule over shells, finer than the table.
@@ -413,8 +751,54 @@ mod tests {
             assert!((m / 2.0e30 - 1.0).abs() < 1e-4, "index {n}: {m:e}");
             assert_eq!(p.density_at(p.radius()), 0.0);
             assert!((p.temperature_at(0.0) - 1e7).abs() < 1.0);
-            assert_eq!(p.temperature_at(p.radius()), 5e3);
+            // Eddington at tau = 0: T_eff (1/2)^(1/4).
+            let top = 5e3 * 0.5f64.sqrt().sqrt();
+            assert!((p.temperature_at(p.radius()) / top - 1.0).abs() < 1e-12);
         }
+    }
+
+    #[test]
+    fn photosphere_at_two_thirds() {
+        // The level where T_c theta = T_eff sits at tau = 2/3, so the
+        // Eddington atmosphere and the interior meet there at T_eff, and
+        // the temperature rises monotonically inward from the surface.
+        let le = LaneEmden::solve(3);
+        let (central, effective) = (1.571e7, 5772.0);
+        let thermal = Thermal::Central { central, effective };
+        let p = Profile::new(&le, 1.988e30, 6.957e8, thermal).unwrap();
+        let kappa = p.attenuation();
+        assert!(kappa > 0.0);
+        let r = p.radius();
+        let rho = |x: f64| p.density_at(x);
+        // Find the photosphere radius from the table's own temperature.
+        let (mut lo, mut hi) = (0.9 * r, r);
+        for _ in 0..60 {
+            let mid = 0.5 * (lo + hi);
+            if p.temperature_at(mid) > effective {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let r_eff = 0.5 * (lo + hi);
+        let tau = kappa * simpson(&rho, r_eff, r, 4096);
+        assert!((tau / PHOTOSPHERE_TAU - 1.0).abs() < 0.05, "tau {tau}");
+        let mut last = 0.0;
+        for k in 0..=2000 {
+            let t = p.temperature_at(r * (1.0 - k as f64 * 1e-5));
+            assert!(t >= last, "temperature falls inward at step {k}");
+            last = t;
+        }
+        assert!(Profile::new(
+            &le,
+            1.988e30,
+            6.957e8,
+            Thermal::Central {
+                central,
+                effective: 2e7
+            }
+        )
+        .is_err());
     }
 
     #[test]
