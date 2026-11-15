@@ -1,12 +1,14 @@
 //! The chunk compiler against the bundled data and small hand-made systems:
-//! mass conservation, the exact empty-cell decision, the key listing, and
-//! the error and empty cases.
+//! mass conservation for the uniform balls and the polytropes, the
+//! polytropes' thin outer layers, the exact empty-cell decision, the key
+//! listing, and the error and empty cases.
 
 mod common;
 
-use common::{system, EARTH, MOON, SUN};
+use common::{system, EARTH, GAS, MOON, ORIGIN_UTC_MS, SUN};
 use gx_core::key::{CellKey, ChunkKey};
 use gx_core::matter::{self, Compression, State};
+use gx_core::units::Vec3;
 use system_compiler::compile::{intersects, non_empty_keys, section};
 use system_compiler::{compile, CompileError, CompileOptions, System};
 
@@ -16,7 +18,7 @@ fn decode(key: &CellKey, bytes: &[u8]) -> matter::Section {
 }
 
 fn compile_cell(s: &System, key: CellKey) -> matter::Section {
-    let bytes = compile(s, &ChunkKey::Cell(key), &CompileOptions::default()).unwrap();
+    let bytes = compile(s, &ChunkKey::Cell(key), 0, &CompileOptions::default()).unwrap();
     decode(&key, &bytes)
 }
 
@@ -34,27 +36,91 @@ fn mass_error(s: &System, frame_id: u64, depth: u8) -> f64 {
 }
 
 #[test]
-fn depth_two_conserves_mass() {
+fn uniform_balls_conserve_mass() {
     let s = system();
-    let err = mass_error(&s, EARTH, 2);
-    // Achieved: 8.6e-4 (0.086 percent) with 4 x 4 x 4 sub-sampling, the
-    // same for every body because each frame extent is 8 mean radii.
-    assert!(err < 0.005, "relative mass error {err:e}");
-    for id in [SUN, MOON] {
-        let err = mass_error(&s, id, 2);
-        assert!(err < 0.005, "frame {id}: relative mass error {err:e}");
+    // Achieved: 8.6e-4 (0.086 percent) at depths 1 and 2, the same for
+    // every body because each frame extent is 8 mean radii; 5.8e-3 at depth
+    // 0, where the ball is 8 samples across.
+    for id in [2, EARTH, MOON] {
+        for (depth, limit) in [(0, 0.01), (1, 0.005), (2, 0.005)] {
+            let err = mass_error(&s, id, depth);
+            assert!(err < limit, "frame {id} depth {depth}: {err:e}");
+        }
     }
 }
 
 #[test]
-fn depth_one_conserves_mass() {
+fn polytropes_conserve_mass_at_the_coarsest_depth() {
+    // The coarsest depth that covers a whole frame is 0: one cell. The
+    // brief allows 2 percent there; depths 1 and 2 are checked too.
     let s = system();
-    // Achieved: 8.6e-4 (0.086 percent) at 32 samples per axis. At 16 it was
-    // 5.8e-3, over the limit the end to end test (scripts/e2e.sh) checks.
-    for id in [SUN, EARTH, MOON] {
-        let err = mass_error(&s, id, 1);
-        assert!(err < 0.005, "frame {id}: relative mass error {err:e}");
+    for id in std::iter::once(SUN).chain(GAS) {
+        for depth in 0..=2 {
+            let err = mass_error(&s, id, depth);
+            println!("frame {id} depth {depth}: relative mass error {err:.2e}");
+            assert!(err < 0.02, "frame {id} depth {depth}: {err:e}");
+        }
     }
+}
+
+#[test]
+fn polytrope_outer_edge_is_thin() {
+    // The depth 6 cell holding the surface point (R, 0, 0): cell x index 39
+    // spans [0.875 R, R] along x. Every sample whose center is beyond
+    // 0.999 R has a density below 1 percent of the mean.
+    let s = system();
+    for id in std::iter::once(SUN).chain(GAS) {
+        let body = s.body(id).unwrap();
+        let key = CellKey::new(id, 6, 39, 32, 32).unwrap();
+        let sec = compile_cell(&s, key);
+        let samples = sec.samples().unwrap();
+        let n = usize::from(sec.resolution());
+        let edge = sec.edge().value() / n as f64;
+        let o = sec.origin();
+        let r = body.mean_radius.value();
+        let mean = body.mean_density().value();
+        let mut checked = 0;
+        for (i, x) in samples.iter().enumerate() {
+            let (ix, iy, iz) = (i % n, (i / n) % n, i / (n * n));
+            let c = Vec3::new(
+                o.x + (ix as f64 + 0.5) * edge,
+                o.y + (iy as f64 + 0.5) * edge,
+                o.z + (iz as f64 + 0.5) * edge,
+            );
+            if c.length() > 0.999 * r {
+                assert!(x.density.value() < 0.01 * mean, "frame {id} sample {i}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "frame {id}");
+        // Deeper in, the density rises well above the edge.
+        assert!(body.density_at_radius(0.5 * r).value() > 0.01 * mean);
+    }
+}
+
+#[test]
+fn polytrope_samples_are_hot_inside() {
+    let s = system();
+    let key = CellKey::new(SUN, 2, 1, 1, 1).unwrap();
+    let sec = compile_cell(&s, key);
+    let hottest = sec
+        .samples()
+        .unwrap()
+        .iter()
+        .map(|x| x.temperature.value())
+        .fold(0.0f64, f64::max);
+    // The sample at the center corner averages the core: millions of kelvin.
+    assert!(hottest > 1.0e7, "{hottest}");
+    let coolest = sec
+        .samples()
+        .unwrap()
+        .iter()
+        .filter(|x| x.density.value() > 0.0)
+        .map(|x| x.temperature.value())
+        .fold(f64::INFINITY, f64::min);
+    // The outermost samples average the floor at the effective temperature
+    // with hotter matter just inside, weighted by density.
+    assert!((5772.0..1.0e5).contains(&coolest), "{coolest}");
 }
 
 #[test]
@@ -142,10 +208,12 @@ mass_kg = 1.0e3
 mean_radius_m = {r:?}
 position_m = [1.0e11, 0.0, 0.0]
 velocity_m_per_s = [0.0, 3.0e4, 0.0]
-pole_ra_deg = 0.0
-pole_dec_deg = 90.0
-prime_meridian_deg = 0.0
-rotation_rate_deg_per_day = 360.0
+pole_ra_deg = [0.0, 0.0]
+pole_dec_deg = [90.0, 0.0]
+prime_meridian_deg = [0.0, 360.0, 0.0]
+j2 = 0.0
+reference_radius_m = 0.0
+principal_moments_kg_m2 = [0.0, 0.0, 0.0]
 state = "solid"
 temperature_k = 250.0
 albedo = [0.3, 0.3, 0.3]
@@ -184,7 +252,7 @@ fn samples_follow_the_vacuum_rules_and_body_matter() {
     let key = CellKey::new(EARTH, 2, 1, 1, 1).unwrap();
     let sec = compile_cell(&s, key);
     let body = s.body(EARTH).unwrap();
-    let mean = body.mean_density().value() as f32;
+    let mean = body.uniform_sample().density.value() as f32;
     let samples = sec.samples().unwrap();
     assert_eq!(sec.resolution(), 16);
     let (mut full, mut partial, mut vacuum) = (0, 0, 0);
@@ -218,6 +286,7 @@ fn root_and_unknown_frames_and_deep_cells() {
         compile(
             &s,
             &"99-0-0-0-0".parse().unwrap(),
+            0,
             &CompileOptions::default()
         ),
         Err(CompileError::UnknownFrame(99))
@@ -241,8 +310,8 @@ fn compression_does_not_change_the_samples() {
         compression: Compression::None,
         ..CompileOptions::default()
     };
-    let a = compile(&s, &ChunkKey::Cell(key), &raw).unwrap();
-    let b = compile(&s, &ChunkKey::Cell(key), &CompileOptions::default()).unwrap();
+    let a = compile(&s, &ChunkKey::Cell(key), 0, &raw).unwrap();
+    let b = compile(&s, &ChunkKey::Cell(key), 0, &CompileOptions::default()).unwrap();
     assert!(b.len() < a.len());
     assert_eq!(decode(&key, &a), decode(&key, &b));
     assert_eq!(decode(&key, &a), section(&s, &key, &raw).unwrap());
@@ -253,15 +322,30 @@ fn a_bad_resolution_is_reported_not_emitted() {
     let s = system();
     let mut opts = CompileOptions::default();
     opts.resolution_by_depth[1] = 0;
-    let r = compile(&s, &"4-1-0-0-0".parse().unwrap(), &opts);
+    let r = compile(&s, &"4-1-0-0-0".parse().unwrap(), 0, &opts);
     assert!(matches!(r, Err(CompileError::Invalid(_))));
 }
 
 #[test]
 fn registry_decodes() {
     let s = system();
-    let bytes = compile(&s, &ChunkKey::Registry, &CompileOptions::default()).unwrap();
+    let opts = CompileOptions::default();
+    let bytes = compile(&s, &ChunkKey::Registry, ORIGIN_UTC_MS, &opts).unwrap();
     let reg = gx_core::registry::decode(&bytes).unwrap();
-    assert_eq!(reg, s.registry());
+    assert_eq!(reg, s.registry_at(ORIGIN_UTC_MS).unwrap());
     assert_eq!(reg.frames().len(), 11);
+    // An origin too far from the data epoch is reported, not emitted.
+    let far = compile(&s, &ChunkKey::Registry, i64::MAX / 2, &opts);
+    assert!(matches!(far, Err(CompileError::Registry(_))));
+}
+
+#[test]
+fn cells_do_not_depend_on_the_origin() {
+    let s = system();
+    let key: ChunkKey = "6-2-1-2-1".parse().unwrap();
+    let opts = CompileOptions::default();
+    assert_eq!(
+        compile(&s, &key, 0, &opts).unwrap(),
+        compile(&s, &key, ORIGIN_UTC_MS, &opts).unwrap()
+    );
 }

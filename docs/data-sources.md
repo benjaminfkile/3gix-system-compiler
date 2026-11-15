@@ -2,18 +2,24 @@
 
 Every number in `data/system.toml` comes from one of the sources below. This
 file records the exact requests, the response blocks the numbers were taken
-from, and every conversion. All responses were fetched on 2026-10-04.
+from, and every conversion. The J2000 responses were fetched on 2026-10-04;
+the oblateness, moments, polytrope temperatures, rotational element
+polynomials, giant planet barycenter states, and the check vectors at the
+2026-11-14 origin were added for the module (see the sections below).
 
 ## Summary
 
 | Quantity | Source | Conversion |
 |---|---|---|
-| `position_m`, `velocity_m_per_s` | JPL Horizons API, geometric state vectors (DE441) | km and km/s times 1000, digits kept exactly |
-| `mass_kg` | NAIF kernel `gm_de440.tpc`, GM in km^3/s^2 (DE440 values) | `GM * 1e9 / 6.67430e-11` |
+| `position_m`, `velocity_m_per_s` | JPL Horizons API, geometric state vectors (DE441) at J2000: body centers, except the giant planets, which use their system barycenters | km and km/s times 1000, digits kept exactly |
+| `mass_kg` | NAIF kernel `gm_de440.tpc`, GM in km^3/s^2 (DE440 values): body GM, except the giant planets, which use their system GM | `GM * 1e9 / 6.67430e-11` |
 | `mean_radius_m` | Horizons physical data block, volumetric mean radius in km | times 1000 |
 | `sidereal_orbit_period_s` (check value) | Horizons physical data block, sidereal orbit period in days | times 86400 |
-| `pole_ra_deg`, `pole_dec_deg`, `prime_meridian_deg`, `rotation_rate_deg_per_day` | IAU WGCCRE report as encoded in NAIF kernel `pck00011.tpc` | evaluated at J2000 with every periodic term, see below |
-| `temperature_k` | NASA NSSDCA fact sheets, black-body temperature; Horizons for the Sun's effective temperature | none |
+| `pole_ra_deg`, `pole_dec_deg`, `prime_meridian_deg`, `rotation_terms` | IAU WGCCRE report as encoded in NAIF kernel `pck00011.tpc` | copied as polynomials and periodic terms, evaluated at the origin in code, see below |
+| `j2`, `reference_radius_m` | NASA NSSDCA fact sheets (J2 and equatorial radius); helioseismology for the Sun | `J2 (x 10-6)` times 1e-6, km times 1000 |
+| `principal_moments_kg_m2` | NASA NSSDCA fact sheets, `Moment of inertia (I/MR2)`; literature for the Sun and Neptune | `C = f M R^2`, `A = B = C - J2 M reference_radius^2` |
+| `temperature_k` | NASA NSSDCA fact sheets: black-body temperature for solid bodies, temperature at 1 bar for gas bodies; Horizons for the Sun's effective temperature | none |
+| `central_temperature_k`, `polytropic_index` | NASA NSSDCA Sun fact sheet; the index is the brief's (1 gas, 3 plasma) | none |
 | `albedo` | NASA NSSDCA fact sheets, geometric albedo, tinted per band | see "Albedo bands" |
 | `roughness`, `attenuation_m2_per_kg` | chosen model parameters, see `docs/model.md` | none |
 | `root_extent_m`, `max_depth` | chosen frame layout | `8 * mean_radius_m`; 6 |
@@ -38,10 +44,19 @@ body with:
 - `OBJ_DATA=YES`, so the same response carries the physical data block the
   radius, period, and Sun temperature come from.
 
-Targets are body centers (`10`, `199`, `299`, `399`, `499`, `599`, `699`,
-`799`, `899`, `301`), not system barycenters, because each frame is the
-center of a body's matter. Horizons computes the giant planets' centers from
-their satellite ephemerides (named in the `Target body name` line).
+Targets are body centers (`10`, `199`, `299`, `399`, `499`, `301`) for the
+Sun, the inner planets, and the Moon. For the giant planets the baked states
+are their system barycenters (`COMMAND='5'`, `'6'`, `'7'`, `'8'`, the same
+request otherwise) and their masses the system GMs (`BODY5_GM` to
+`BODY8_GM`). Their satellites are not modeled, so integrating the body
+center from J2000 would carry the center's monthly wobble about the
+barycenter (up to about 3e5 m, for Saturn) forward as a spurious orbit
+error; the barycenter moves on the smooth heliocentric orbit the integrator
+reproduces. The difference between center and barycenter, at most a few
+times 1e5 m, is well inside the 0.1 percent check. The request and
+response blocks below are the body center requests of 2026-10-04, kept for
+the physical data lines; the barycenter values in `data/system.toml` are
+quoted there with their request.
 
 Conversion: each value is multiplied by 1000 in decimal arithmetic, so the
 digits in `data/system.toml` are exactly the digits Horizons returned with
@@ -371,9 +386,17 @@ written with the shortest decimal that round trips. Each value is also
 quoted next to its mass in `data/system.toml`. The Sun's mass is
 1.98841e30 kg, 0.003 percent from the IAU nominal 1.98847e30 kg.
 
-The planet masses exclude their satellites. Only the Moon is modeled as a
-satellite in v1, so the giant planets are each lighter than their systems by
-at most a few parts in ten thousand.
+The masses of the giant planets are the system GMs instead, matching their
+barycenter states (see "State vectors"):
+
+```text
+BODY5_GM       = ( 1.2671276409999998E+08 )
+BODY6_GM       = ( 3.7940584841799997E+07 )
+BODY7_GM       = ( 5.7945563999999985E+06 )
+BODY8_GM       = ( 6.8365271005803989E+06 )
+```
+
+They exceed the body GMs by at most a few parts in ten thousand.
 
 ## Rotation: IAU rotational elements
 
@@ -431,16 +454,18 @@ W      = W0 + Wdot d + sum_i pm_i sin(theta_i)
 
 with `d` days and `T` Julian centuries past J2000 TDB, and `theta_i` the
 nutation precession angles of the body's system (`BODYn_NUT_PREC_ANGLES`,
-coefficients `BODYnnn_NUT_PREC_RA`, `_DEC`, `_PM`). At the epoch `d = T =
-0`, so every polynomial reduces to its constant term and every periodic term
-to its coefficient times the sine or cosine of its angle's constant term.
-`scripts/iau-at-epoch.py` evaluates this directly from the kernel:
+coefficients `BODYnnn_NUT_PREC_RA`, `_DEC`, `_PM`), each angle itself a
+polynomial in `T`. `data/system.toml` holds the polynomials and every
+nonzero periodic term as the kernel gives them, printed by
 
 ```text
-python3 scripts/iau-at-epoch.py pck00011.tpc
+python3 scripts/iau-elements.py pck00011.tpc
 ```
 
-Output, the values in `data/system.toml`:
+and `crates/system-compiler/src/rotation.rs` evaluates them at the origin,
+with `dW/dt` (including the derivative of every periodic term) as the spin
+rate. At J2000 (`d = T = 0`) the evaluation reproduces the values the
+compiler baked before it took an origin, which `tests/data.rs` checks:
 
 ```text
 body        pole_ra_deg   pole_dec_deg         W0_deg     Wdot_deg_day
@@ -469,11 +494,51 @@ The conversion to the registry (unit tests in
 - Orientation in the registry is relative to the parent's axes:
   `conj(q_parent) * q`. The root's axes are the ICRF axes, so planets carry
   `q` itself and the Moon carries `conj(q_earth) * q_moon`.
-- Angular velocity `(0, 0, Wdot * pi / 180 / 86400)` rad/s about the body
-  axes. `Wdot` is negative for retrograde rotation (Venus and Uranus).
+- Angular velocity `(0, 0, dW/dt * pi / 180 / 86400)` rad/s about the body
+  axes, with `dW/dt` in degrees per day at the origin. It is negative for
+  retrograde rotation (Venus and Uranus).
 - Sine and cosine come from `crates/system-compiler/src/detmath.rs`, written
   out with correctly rounded operations, so the registry bytes are the same
   on every machine.
+
+## Oblateness and moments of inertia
+
+Each body's `j2` and `reference_radius_m` are the NSSDCA fact sheet's
+`J2 (x 10-6)` and equatorial radius (the 1 bar equatorial radius for the
+giant planets), quoted on each body in `data/system.toml`. The Sun's is the
+helioseismic value 2.2e-7 at the solar radius (Mecheri et al. 2004, Solar
+Physics 222, 191).
+
+`principal_moments_kg_m2` comes from the polar moment of inertia factor
+`f = C / (M R^2)`: the fact sheets' `Moment of inertia (I/MR2)` for the
+planets and the Moon, 0.070 for the Sun (standard solar model), and 0.23
+for Neptune, whose sheet lists none (Yoder 1995, Global Earth Physics,
+AGU). With the volumetric mean radius `R` and the frame mass `M`,
+
+```text
+C = f M R^2
+A = B = C - J2 M reference_radius^2
+```
+
+the second line from MacCullagh's formula `J2 = (C - A) / (M a^2)` for a
+body symmetric about its pole. Every body in the data has a published J2,
+so none falls back to 0 and constant spin; the code supports it.
+
+## Check vectors at the origin: JPL Horizons
+
+`crates/system-compiler/tests/data/horizons-2026-11-14.toml` holds the
+Horizons geometric positions at the origin 2026-11-14T00:00:00Z of every
+body center relative to its parent frame (`@0` for the Sun and the planets,
+`@399` for the Moon), ICRF axes, km times 1000. They were fetched once with
+
+```text
+python3 scripts/fetch-horizons.py > crates/system-compiler/tests/data/horizons-2026-11-14.toml
+```
+
+which converts the origin to TDB the way `gx_core::timescale` does (37 s
+TAI minus UTC, 32.184 s TT minus TAI, the periodic TDB minus TT term) and
+requests that Julian date TDB. The file records every request URL. The
+tests read it and never fetch anything.
 
 ## Temperature and albedo: NASA NSSDCA fact sheets
 
@@ -494,8 +559,21 @@ URLs `https://nssdc.gsfc.nasa.gov/planetary/factsheet/<name>fact.html` with
 | Neptune | 46.6 | 0.442 |
 
 The black-body temperature is the effective (radiative equilibrium)
-temperature. The Sun's 5772 K is the IAU 2015 nominal effective temperature,
-quoted in the Horizons physical data block for target 10 above.
+temperature; the solid bodies use it. The gas bodies are polytropes and use
+the fact sheets' temperature at the 1 bar level instead (`docs/model.md`,
+"Temperature"):
+
+| Body | Temperature at 1 bar (K) |
+|---|---|
+| Jupiter | 165 |
+| Saturn | 134 |
+| Uranus | 76 |
+| Neptune | 72 |
+
+The Sun's 5772 K is the IAU 2015 nominal effective temperature, quoted in
+the Horizons physical data block for target 10 above; it is the floor of
+the Sun's polytrope. Its central temperature, 1.571e7 K, is from the NSSDCA
+Sun fact sheet.
 
 ### Albedo bands
 

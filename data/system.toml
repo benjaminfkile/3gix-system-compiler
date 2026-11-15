@@ -1,4 +1,4 @@
-# The planetary system this compiler bakes into matter.
+# The planetary system the system module bakes into matter.
 #
 # This is the only place numbers live. Every value is SI (meters, kilograms,
 # seconds, kelvin) except the IAU rotational elements, which keep the IAU
@@ -15,8 +15,19 @@
 #   and the planets are relative to the system barycenter (@0, the root
 #   frame); the Moon is relative to the Earth's center (@399).
 # - Rotational elements are the IAU WGCCRE values from the NAIF kernel
-#   pck00011.tpc, evaluated at J2000 (d = 0, T = 0) with every periodic term
-#   included (scripts/iau-at-epoch.py).
+#   pck00011.tpc, copied as polynomials and periodic terms
+#   (scripts/iau-elements.py): pole_ra_deg and pole_dec_deg are
+#   [a0, a1] with a1 per Julian century of TDB, prime_meridian_deg is
+#   [W0, W1, W2] with W1 per day and W2 per day squared, and each entry of
+#   rotation_terms is one nutation precession term: an angle polynomial
+#   [t0, t1, t2] in degrees and degrees per century (squared), with the
+#   coefficients of its sine in RA, cosine in Dec, and sine in W. The module
+#   evaluates them at the origin.
+# - j2 and reference_radius_m are the published zonal harmonic and the radius
+#   it is quoted against; principal_moments_kg_m2 are the published
+#   C/(M R^2) factors converted to kg m^2 (each body's comment shows how).
+# - Gas and plasma bodies are polytropes (polytropic_index); see
+#   docs/model.md for how temperature_k and central_temperature_k are used.
 # - sidereal_orbit_period_s is a published check value, never compiled: the
 #   tests compare it with the period derived from the state vectors.
 # - root_extent_m is 8 * mean_radius_m for every body frame; max_depth is 6.
@@ -52,21 +63,32 @@ mean_radius_m = 6.957e8
 position_m = [-1.067706805380953e9, -3.960361847959462e8, -1.380651842868809e8]
 # Horizons COMMAND='10' CENTER='@0', VX VY VZ in km/s times 1000.
 velocity_m_per_s = [9.312571926520472e0, -1.170150612817771e1, -5.251266205200356e0]
-# Pole and prime meridian: IAU WGCCRE 2015 report, as BODY10_POLE_RA,
-# BODY10_POLE_DEC, and BODY10_PM in pck00011.tpc, evaluated at J2000.
-pole_ra_deg = 286.13
-pole_dec_deg = 63.87
-prime_meridian_deg = 84.176
-rotation_rate_deg_per_day = 14.1844
+# Pole, prime meridian, and periodic terms: IAU WGCCRE elements as encoded
+# in NAIF pck00011.tpc (scripts/iau-elements.py), evaluated at the origin.
+pole_ra_deg = [286.13, 0.0]
+pole_dec_deg = [63.87, 0.0]
+prime_meridian_deg = [84.176, 14.1844, 0.0]
+# Helioseismic solar oblateness, Mecheri et al. 2004 (Solar Physics 222, 191): J2 = 2.2e-7 at the solar radius.
+j2 = 2.2e-07
+reference_radius_m = 695700000.0
+# C/(M R^2) = 0.070, standard solar model value (Williams, NASA, as tabulated in the literature).
+# Converted with the volumetric mean radius: C = f M R^2,
+# A = B = C - J2 M reference_radius^2 (axisymmetric about the pole).
+principal_moments_kg_m2 = [6.736690454005823e+46, 6.736690454005823e+46, 6.736711626528078e+46]
 state = "plasma"
-# Horizons physical data for target 10: 'Effective temp, K = 5772'.
+# Plasma: a polytrope of index 3 (docs/model.md). temperature_k is the
+# floor held in the outer layers, the photosphere: Horizons physical data for
+# target 10: 'Effective temp, K = 5772'.
+polytropic_index = 3
 temperature_k = 5772.0
+# NASA NSSDCA Sun fact sheet: 'Central temperature: 1.571 x 10^7 K'.
+central_temperature_k = 1.571e7
 # Bands long to short wavelength. Tint: a hot emitter: albedo 0 in every band, so emissivity is 1 and it radiates as a blackbody.
 albedo = [0.0, 0.0, 0.0]
 roughness = 1.0
-# Chosen so attenuation * mean density * 0.01 * mean radius >= 10: opaque
-# within one percent of the radius (asserted in tests/data.rs).
-attenuation_m2_per_kg = 1e-08
+# Chosen so the optical depth of the outer one percent of the radius,
+# through the polytropic profile, is at least 10 (asserted in tests/data.rs).
+attenuation_m2_per_kg = 0.01
 # 8 * mean_radius_m.
 root_extent_m = 5.5656e9
 max_depth = 6
@@ -87,12 +109,25 @@ position_m = [-2.052943316123468e10, -6.032400395827633e10, -3.01308378641183e10
 velocity_m_per_s = [3.700430442920571e4, -8.541376789510446e3, -8.398372409672424e3]
 # Horizons physical data for target 199: 'Sidereal orb. per. = 87.969257 d'; days times 86400.
 sidereal_orbit_period_s = 7.6005438048e6
-# Pole and prime meridian: IAU WGCCRE 2015 report, as BODY199_POLE_RA,
-# BODY199_POLE_DEC, and BODY199_PM in pck00011.tpc, evaluated at J2000.
-pole_ra_deg = 281.0103
-pole_dec_deg = 61.4155
-prime_meridian_deg = 329.599948805
-rotation_rate_deg_per_day = 6.1385108
+# Pole, prime meridian, and periodic terms: IAU WGCCRE elements as encoded
+# in NAIF pck00011.tpc (scripts/iau-elements.py), evaluated at the origin.
+pole_ra_deg = [281.0103, -0.0328]
+pole_dec_deg = [61.4155, -0.0049]
+prime_meridian_deg = [329.5988, 6.1385108, 0.0]
+rotation_terms = [
+  { angle_deg = [174.7910857, 149472.53587500003, 0.0], ra_deg = 0.0, dec_deg = 0.0, pm_deg = 0.01067257 },
+  { angle_deg = [349.5821714, 298945.07175000006, 0.0], ra_deg = 0.0, dec_deg = 0.0, pm_deg = -0.00112309 },
+  { angle_deg = [164.3732571, 448417.60762500006, 0.0], ra_deg = 0.0, dec_deg = 0.0, pm_deg = -0.0001104 },
+  { angle_deg = [339.1643429, 597890.1435000001, 0.0], ra_deg = 0.0, dec_deg = 0.0, pm_deg = -2.539e-05 },
+  { angle_deg = [153.9554286, 747362.679375, 0.0], ra_deg = 0.0, dec_deg = 0.0, pm_deg = -5.71e-06 },
+]
+# NASA NSSDCA Mercury fact sheet: 'J2 (x 10-6) 50.3', 'Equatorial radius (km) 2440.5'.
+j2 = 5.03e-05
+reference_radius_m = 2440500.0
+# NASA NSSDCA Mercury fact sheet: 'Moment of inertia (I/MR2) 0.35'.
+# Converted with the volumetric mean radius: C = f M R^2,
+# A = B = C - J2 M reference_radius^2 (axisymmetric about the pole).
+principal_moments_kg_m2 = [6.874121694887364e+35, 6.874121694887364e+35, 6.875110637788118e+35]
 state = "solid"
 # NASA NSSDCA Mercury fact sheet: 'Black-body temperature (K) 439.6'.
 temperature_k = 439.6
@@ -123,12 +158,18 @@ position_m = [-1.085242008575715e11, -7.3185649596786e9, 3.548121861333776e9]
 velocity_m_per_s = [1.391218601189967e3, -3.202951993781091e4, -1.44970867394732e4]
 # Horizons physical data for target 299: 'Sidereal orb. per., d = 224.70079922'; days times 86400.
 sidereal_orbit_period_s = 1.9414149052608e7
-# Pole and prime meridian: IAU WGCCRE 2015 report, as BODY299_POLE_RA,
-# BODY299_POLE_DEC, and BODY299_PM in pck00011.tpc, evaluated at J2000.
-pole_ra_deg = 272.76
-pole_dec_deg = 67.16
-prime_meridian_deg = 160.2
-rotation_rate_deg_per_day = -1.4813688
+# Pole, prime meridian, and periodic terms: IAU WGCCRE elements as encoded
+# in NAIF pck00011.tpc (scripts/iau-elements.py), evaluated at the origin.
+pole_ra_deg = [272.76, 0.0]
+pole_dec_deg = [67.16, 0.0]
+prime_meridian_deg = [160.2, -1.4813688, 0.0]
+# NASA NSSDCA Venus fact sheet: 'J2 (x 10-6) 4.458', 'Equatorial radius (km) 6051.8'.
+j2 = 4.458e-06
+reference_radius_m = 6051800.0
+# NASA NSSDCA Venus fact sheet: 'Moment of inertia (I/MR2) 0.337'.
+# Converted with the volumetric mean radius: C = f M R^2,
+# A = B = C - J2 M reference_radius^2 (axisymmetric about the pole).
+principal_moments_kg_m2 = [6.007415418953335e+37, 6.007415418953335e+37, 6.00749488796872e+37]
 state = "solid"
 # NASA NSSDCA Venus fact sheet: 'Black-body temperature (K) 226.6'.
 temperature_k = 226.6
@@ -159,12 +200,18 @@ position_m = [-2.756674048281145e10, 1.323613811535491e11, 5.741865328625385e10]
 velocity_m_per_s = [-2.978494749851088e4, -5.029753814928081e3, -2.180645069035755e3]
 # Horizons physical data for target 399: 'Sidereal orb period = 365.25636 d'; days times 86400.
 sidereal_orbit_period_s = 3.1558149504e7
-# Pole and prime meridian: IAU WGCCRE 2009 report (the 2015 report does not revise this body's orientation), as BODY399_POLE_RA,
-# BODY399_POLE_DEC, and BODY399_PM in pck00011.tpc, evaluated at J2000.
-pole_ra_deg = 0.0
-pole_dec_deg = 90.0
-prime_meridian_deg = 190.147
-rotation_rate_deg_per_day = 360.9856235
+# Pole, prime meridian, and periodic terms: IAU WGCCRE elements as encoded
+# in NAIF pck00011.tpc (scripts/iau-elements.py), evaluated at the origin.
+pole_ra_deg = [0.0, -0.641]
+pole_dec_deg = [90.0, -0.557]
+prime_meridian_deg = [190.147, 360.9856235, 0.0]
+# NASA NSSDCA Earth fact sheet: 'J2 (x 10-6) 1082.63', 'Equatorial radius (km) 6378.137'.
+j2 = 0.00108263
+reference_radius_m = 6378137.0
+# NASA NSSDCA Earth fact sheet: 'Moment of inertia (I/MR2) 0.3308'.
+# Converted with the volumetric mean radius: C = f M R^2,
+# A = B = C - J2 M reference_radius^2 (axisymmetric about the pole).
+principal_moments_kg_m2 = [7.992584813748298e+37, 7.992584813748298e+37, 8.018887480921225e+37]
 state = "solid"
 # NASA NSSDCA Earth fact sheet: 'Black-body temperature (K) 254.0'.
 temperature_k = 254.0
@@ -195,12 +242,36 @@ position_m = [2.06980433836461e11, -1.864170112571357e8, -5.667227497442207e9]
 velocity_m_per_s = [1.171984975692608e3, 2.390670819298843e4, 1.093392065056128e4]
 # Horizons physical data for target 499: 'Mean sidereal orb per = 686.98 d'; days times 86400.
 sidereal_orbit_period_s = 5.9355072e7
-# Pole and prime meridian: IAU WGCCRE 2015 report, as BODY499_POLE_RA,
-# BODY499_POLE_DEC, and BODY499_PM in pck00011.tpc, evaluated at J2000.
-pole_ra_deg = 317.680854407
-pole_dec_deg = 52.886439275
-prime_meridian_deg = 176.632059732
-rotation_rate_deg_per_day = 350.8919824433
+# Pole, prime meridian, and periodic terms: IAU WGCCRE elements as encoded
+# in NAIF pck00011.tpc (scripts/iau-elements.py), evaluated at the origin.
+pole_ra_deg = [317.269202, -0.10927547]
+pole_dec_deg = [54.432516, -0.05827105]
+prime_meridian_deg = [176.049863, 350.891982443297, 0.0]
+rotation_terms = [
+  { angle_deg = [198.991226, 19139.4819985, 0.0], ra_deg = 6.8e-05, dec_deg = 0.0, pm_deg = 0.0 },
+  { angle_deg = [226.292679, 38280.8511281, 0.0], ra_deg = 0.000238, dec_deg = 0.0, pm_deg = 0.0 },
+  { angle_deg = [249.663391, 57420.7251593, 0.0], ra_deg = 5.2e-05, dec_deg = 0.0, pm_deg = 0.0 },
+  { angle_deg = [266.18351, 76560.636795, 0.0], ra_deg = 9e-06, dec_deg = 0.0, pm_deg = 0.0 },
+  { angle_deg = [79.398797, 0.5042615, 0.0], ra_deg = 0.419057, dec_deg = 0.0, pm_deg = 0.0 },
+  { angle_deg = [122.433576, 19139.9407476, 0.0], ra_deg = 0.0, dec_deg = 5.1e-05, pm_deg = 0.0 },
+  { angle_deg = [43.058401, 38280.8753272, 0.0], ra_deg = 0.0, dec_deg = 0.000141, pm_deg = 0.0 },
+  { angle_deg = [57.663379, 57420.7517205, 0.0], ra_deg = 0.0, dec_deg = 3.1e-05, pm_deg = 0.0 },
+  { angle_deg = [79.476401, 76560.6495004, 0.0], ra_deg = 0.0, dec_deg = 5e-06, pm_deg = 0.0 },
+  { angle_deg = [166.325722, 0.5042615, 0.0], ra_deg = 0.0, dec_deg = 1.591274, pm_deg = 0.0 },
+  { angle_deg = [129.071773, 19140.0328244, 0.0], ra_deg = 0.0, dec_deg = 0.0, pm_deg = 0.000145 },
+  { angle_deg = [36.352167, 38281.0473591, 0.0], ra_deg = 0.0, dec_deg = 0.0, pm_deg = 0.000157 },
+  { angle_deg = [56.668646, 57420.929536, 0.0], ra_deg = 0.0, dec_deg = 0.0, pm_deg = 4e-05 },
+  { angle_deg = [67.364003, 76560.2552215, 0.0], ra_deg = 0.0, dec_deg = 0.0, pm_deg = 1e-06 },
+  { angle_deg = [104.79268, 95700.4387578, 0.0], ra_deg = 0.0, dec_deg = 0.0, pm_deg = 1e-06 },
+  { angle_deg = [95.391654, 0.5042615, 0.0], ra_deg = 0.0, dec_deg = 0.0, pm_deg = 0.584542 },
+]
+# NASA NSSDCA Mars fact sheet: 'J2 (x 10-6) 1960.45', 'Equatorial radius (km) 3396.2'.
+j2 = 0.00196045
+reference_radius_m = 3396200.0
+# NASA NSSDCA Mars fact sheet: 'Moment of inertia (I/MR2) 0.366'.
+# Converted with the volumetric mean radius: C = f M R^2,
+# A = B = C - J2 M reference_radius^2 (axisymmetric about the pole).
+principal_moments_kg_m2 = [2.6843840691507585e+36, 2.6843840691507585e+36, 2.6988940936150755e+36]
 state = "solid"
 # NASA NSSDCA Mars fact sheet: 'Black-body temperature (K) 209.8'.
 temperature_k = 209.8
@@ -221,33 +292,52 @@ frame_id = 6
 parent_frame_id = 0
 # Compiler-side only; never emitted.
 name = "Jupiter"
-# BODY599_GM = 1.266865319003704E+08 km^3/s^2 (NAIF gm_de440.tpc); GM * 1e9 / 6.67430e-11.
-mass_kg = 1.898124625809005e27
+# BODY5_GM = 1.2671276409999998E+08 km^3/s^2 (NAIF gm_de440.tpc), the GM of the planet with its
+# satellites, which are not modeled; GM * 1e9 / 6.67430e-11.
+mass_kg = 1.8985176587806957e+27
 # Horizons physical data for target 599: 'Vol. Mean Radius (km) = 69911+-6'.
 mean_radius_m = 6.9911e7
-# Horizons COMMAND='599' CENTER='@0', X Y Z in km times 1000.
-position_m = [5.974999178516835e11, 4.089902697993661e11, 1.607562616932818e11]
-# Horizons COMMAND='599' CENTER='@0', VX VY VZ in km/s times 1000.
-velocity_m_per_s = [-7.900547720245487e3, 1.01718725762267e4, 4.552504127783227e3]
+# Horizons COMMAND='5' (Jupiter Barycenter) CENTER='@0', X Y Z in km times 1000:
+# the frame is the system barycenter, so the baked momentum includes the
+# satellites' (docs/data-sources.md).
+position_m = [5.974998767925479e11, 4.089903139317586e11, 1.607562819387201e11]
+# Horizons COMMAND='5' CENTER='@0', VX VY VZ in km/s times 1000.
+velocity_m_per_s = [-7.900525116640771e3, 1.017179630923791e4, 4.552467787262923e3]
 # Horizons physical data for target 599: 'Sidereal orbit period = 4332.589 d'; days times 86400.
 sidereal_orbit_period_s = 3.743356896e8
-# Pole and prime meridian: IAU WGCCRE 2015 report, as BODY599_POLE_RA,
-# BODY599_POLE_DEC, and BODY599_PM in pck00011.tpc, evaluated at J2000.
-pole_ra_deg = 268.057204043
-pole_dec_deg = 64.495809953
-prime_meridian_deg = 284.95
-rotation_rate_deg_per_day = 870.536
+# Pole, prime meridian, and periodic terms: IAU WGCCRE elements as encoded
+# in NAIF pck00011.tpc (scripts/iau-elements.py), evaluated at the origin.
+pole_ra_deg = [268.056595, -0.006499]
+pole_dec_deg = [64.495303, 0.002413]
+prime_meridian_deg = [284.95, 870.536, 0.0]
+rotation_terms = [
+  { angle_deg = [99.360714, 4850.4046, 0.0], ra_deg = 0.000117, dec_deg = 5e-05, pm_deg = 0.0 },
+  { angle_deg = [175.895369, 1191.9605, 0.0], ra_deg = 0.000938, dec_deg = 0.000404, pm_deg = 0.0 },
+  { angle_deg = [300.323162, 262.5475, 0.0], ra_deg = 0.001432, dec_deg = 0.000617, pm_deg = 0.0 },
+  { angle_deg = [114.012305, 6070.2476, 0.0], ra_deg = 3e-05, dec_deg = -1.3e-05, pm_deg = 0.0 },
+  { angle_deg = [49.511251, 64.3, 0.0], ra_deg = 0.00215, dec_deg = 0.000926, pm_deg = 0.0 },
+]
+# NASA NSSDCA Jupiter fact sheet: 'J2 (x 10-6) 14,736', 'Equatorial radius (1 bar level) (km) 71,492'.
+j2 = 0.014736
+reference_radius_m = 71492000.0
+# NASA NSSDCA Jupiter fact sheet: 'Moment of inertia (I/MR2) 0.254'.
+# Converted with the volumetric mean radius: C = f M R^2,
+# A = B = C - J2 M reference_radius^2 (axisymmetric about the pole).
+principal_moments_kg_m2 = [2.213899247038648e+42, 2.213899247038648e+42, 2.3568903931834658e+42]
 state = "gas"
-# NASA NSSDCA Jupiter fact sheet: 'Black-body temperature (K) 109.9'.
-temperature_k = 109.9
+# Gas: a polytrope of index 1 (docs/model.md). temperature_k is the
+# temperature at the model's 1 bar level: NASA NSSDCA Jupiter fact sheet:
+# 'Temperature at 1 bar: 165 K'.
+polytropic_index = 1
+temperature_k = 165.0
 # Bands long to short wavelength (600 to 700 nm, 500 to 600 nm, 400 to
 # 500 nm). Mean of the three is the geometric albedo 0.538 (NASA NSSDCA Jupiter fact sheet: 'Geometric albedo 0.538');
 # tint: tan and cream cloud bands, darker in the blue band.
 albedo = [0.6, 0.54, 0.474]
 roughness = 0.4
-# Chosen so attenuation * mean density * 0.01 * mean radius >= 10: opaque
-# within one percent of the radius (asserted in tests/data.rs).
-attenuation_m2_per_kg = 1e-07
+# Chosen so the optical depth of the outer one percent of the radius,
+# through the polytropic profile, is at least 10 (asserted in tests/data.rs).
+attenuation_m2_per_kg = 3e-06
 # 8 * mean_radius_m.
 root_extent_m = 5.59288e8
 max_depth = 6
@@ -258,33 +348,45 @@ frame_id = 7
 parent_frame_id = 0
 # Compiler-side only; never emitted.
 name = "Saturn"
-# BODY699_GM = 3.793120623436167E+07 km^3/s^2 (NAIF gm_de440.tpc); GM * 1e9 / 6.67430e-11.
-mass_kg = 5.683173701266302e26
+# BODY6_GM = 3.7940584841799997E+07 km^3/s^2 (NAIF gm_de440.tpc), the GM of the planet with its
+# satellites, which are not modeled; GM * 1e9 / 6.67430e-11.
+mass_kg = 5.684578883448451e+26
 # Horizons physical data for target 699: 'Vol. Mean Radius (km) = 58232+-6'.
 mean_radius_m = 5.8232e7
-# Horizons COMMAND='699' CENTER='@0', X Y Z in km times 1000.
-position_m = [9.573176521103407e11, 9.233194350574769e11, 3.401627932740891e11]
-# Horizons COMMAND='699' CENTER='@0', VX VY VZ in km/s times 1000.
-velocity_m_per_s = [-7.42190038683812e3, 6.098450820882325e3, 2.837547973276323e3]
+# Horizons COMMAND='6' (Saturn Barycenter) CENTER='@0', X Y Z in km times 1000:
+# the frame is the system barycenter, so the baked momentum includes the
+# satellites' (docs/data-sources.md).
+position_m = [9.573174174143425e11, 9.233196218969914e11, 3.401628003886153e11]
+# Horizons COMMAND='6' CENTER='@0', VX VY VZ in km/s times 1000.
+velocity_m_per_s = [-7.422709426014511e3, 6.097474815228996e3, 2.837682288255575e3]
 # Horizons physical data for target 699: 'Sidereal orbit period = 10755.698 d'; days times 86400.
 sidereal_orbit_period_s = 9.292923072e8
-# Pole and prime meridian: IAU WGCCRE 2015 report, as BODY699_POLE_RA,
-# BODY699_POLE_DEC, and BODY699_PM in pck00011.tpc, evaluated at J2000.
-pole_ra_deg = 40.589
-pole_dec_deg = 83.537
-prime_meridian_deg = 38.9
-rotation_rate_deg_per_day = 810.7939024
+# Pole, prime meridian, and periodic terms: IAU WGCCRE elements as encoded
+# in NAIF pck00011.tpc (scripts/iau-elements.py), evaluated at the origin.
+pole_ra_deg = [40.589, -0.036]
+pole_dec_deg = [83.537, -0.004]
+prime_meridian_deg = [38.9, 810.7939024, 0.0]
+# NASA NSSDCA Saturn fact sheet: 'J2 (x 10-6) 16,298.', 'Equatorial radius (1 bar level) (km) 60,268'.
+j2 = 0.016298
+reference_radius_m = 60268000.0
+# NASA NSSDCA Saturn fact sheet: 'Moment of inertia (I/MR2) 0.210'.
+# Converted with the volumetric mean radius: C = f M R^2,
+# A = B = C - J2 M reference_radius^2 (axisymmetric about the pole).
+principal_moments_kg_m2 = [3.7114883203919176e+41, 3.7114883203919176e+41, 4.048004670697212e+41]
 state = "gas"
-# NASA NSSDCA Saturn fact sheet: 'Black-body temperature (K) 81.0'.
-temperature_k = 81.0
+# Gas: a polytrope of index 1 (docs/model.md). temperature_k is the
+# temperature at the model's 1 bar level: NASA NSSDCA Saturn fact sheet:
+# 'Temperature at 1 bar: 134 K'.
+polytropic_index = 1
+temperature_k = 134.0
 # Bands long to short wavelength (600 to 700 nm, 500 to 600 nm, 400 to
 # 500 nm). Mean of the three is the geometric albedo 0.499 (NASA NSSDCA Saturn fact sheet: 'Geometric albedo 0.499');
 # tint: pale gold haze, darker in the blue band.
 albedo = [0.56, 0.51, 0.427]
 roughness = 0.4
-# Chosen so attenuation * mean density * 0.01 * mean radius >= 10: opaque
-# within one percent of the radius (asserted in tests/data.rs).
-attenuation_m2_per_kg = 1e-07
+# Chosen so the optical depth of the outer one percent of the radius,
+# through the polytropic profile, is at least 10 (asserted in tests/data.rs).
+attenuation_m2_per_kg = 3e-06
 # 8 * mean_radius_m.
 root_extent_m = 4.65856e8
 max_depth = 6
@@ -295,33 +397,45 @@ frame_id = 8
 parent_frame_id = 0
 # Compiler-side only; never emitted.
 name = "Uranus"
-# BODY799_GM = 5.793951256527211E+06 km^3/s^2 (NAIF gm_de440.tpc); GM * 1e9 / 6.67430e-11.
-mass_kg = 8.680987154498916e25
+# BODY7_GM = 5.7945563999999985E+06 km^3/s^2 (NAIF gm_de440.tpc), the GM of the planet with its
+# satellites, which are not modeled; GM * 1e9 / 6.67430e-11.
+mass_kg = 8.681893831562859e+25
 # Horizons physical data for target 799: 'Vol. Mean Radius (km) = 25362+-12'.
 mean_radius_m = 2.5362e7
-# Horizons COMMAND='799' CENTER='@0', X Y Z in km times 1000.
-position_m = [2.157907112723417e12, -1.871307099571182e12, -8.501069259961469e11]
-# Horizons COMMAND='799' CENTER='@0', VX VY VZ in km/s times 1000.
-velocity_m_per_s = [4.646584677611653e3, 4.251110198227456e3, 1.796121552064855e3]
+# Horizons COMMAND='7' (Uranus Barycenter) CENTER='@0', X Y Z in km times 1000:
+# the frame is the system barycenter, so the baked momentum includes the
+# satellites' (docs/data-sources.md).
+position_m = [2.157907312953845e12, -1.871306838939559e12, -8.501068000312823e11]
+# Horizons COMMAND='7' CENTER='@0', VX VY VZ in km/s times 1000.
+velocity_m_per_s = [4.646336807878125e3, 4.251152675974153e3, 1.79617278581112e3]
 # Horizons physical data for target 799: 'Sidereal orbit period = 30685.4 d'; days times 86400.
 sidereal_orbit_period_s = 2.65121856e9
-# Pole and prime meridian: IAU WGCCRE 2015 report, as BODY799_POLE_RA,
-# BODY799_POLE_DEC, and BODY799_PM in pck00011.tpc, evaluated at J2000.
-pole_ra_deg = 257.311
-pole_dec_deg = -15.175
-prime_meridian_deg = 203.81
-rotation_rate_deg_per_day = -501.1600928
+# Pole, prime meridian, and periodic terms: IAU WGCCRE elements as encoded
+# in NAIF pck00011.tpc (scripts/iau-elements.py), evaluated at the origin.
+pole_ra_deg = [257.311, 0.0]
+pole_dec_deg = [-15.175, 0.0]
+prime_meridian_deg = [203.81, -501.1600928, 0.0]
+# NASA NSSDCA Uranus fact sheet: 'J2 (x 10-6) 3343.43', 'Equatorial radius (1 bar level) (km) 25,559'.
+j2 = 0.00334343
+reference_radius_m = 25559000.0
+# NASA NSSDCA Uranus fact sheet: 'Moment of inertia (I/MR2) 0.225'.
+# Converted with the volumetric mean radius: C = f M R^2,
+# A = B = C - J2 M reference_radius^2 (axisymmetric about the pole).
+principal_moments_kg_m2 = [1.2375418686446424e+40, 1.2375418686446424e+40, 1.256504317464001e+40]
 state = "gas"
-# NASA NSSDCA Uranus fact sheet: 'Black-body temperature (K) 58.1'.
-temperature_k = 58.1
+# Gas: a polytrope of index 1 (docs/model.md). temperature_k is the
+# temperature at the model's 1 bar level: NASA NSSDCA Uranus fact sheet:
+# 'Temperature at 1 bar: 76 K'.
+polytropic_index = 1
+temperature_k = 76.0
 # Bands long to short wavelength (600 to 700 nm, 500 to 600 nm, 400 to
 # 500 nm). Mean of the three is the geometric albedo 0.488 (NASA NSSDCA Uranus fact sheet: 'Geometric albedo 0.488');
 # tint: methane absorbs the red band, leaving a pale cyan.
 albedo = [0.38, 0.52, 0.564]
 roughness = 0.4
-# Chosen so attenuation * mean density * 0.01 * mean radius >= 10: opaque
-# within one percent of the radius (asserted in tests/data.rs).
-attenuation_m2_per_kg = 1e-07
+# Chosen so the optical depth of the outer one percent of the radius,
+# through the polytropic profile, is at least 10 (asserted in tests/data.rs).
+attenuation_m2_per_kg = 3e-06
 # 8 * mean_radius_m.
 root_extent_m = 2.02896e8
 max_depth = 6
@@ -332,33 +446,48 @@ frame_id = 9
 parent_frame_id = 0
 # Compiler-side only; never emitted.
 name = "Neptune"
-# BODY899_GM = 6.835103145462294E+06 km^3/s^2 (NAIF gm_de440.tpc); GM * 1e9 / 6.67430e-11.
-mass_kg = 1.024092885465486e26
+# BODY8_GM = 6.8365271005803989E+06 km^3/s^2 (NAIF gm_de440.tpc), the GM of the planet with its
+# satellites, which are not modeled; GM * 1e9 / 6.67430e-11.
+mass_kg = 1.0243062344486162e+26
 # Horizons physical data for target 899: 'Vol. mean radius (km) = 24624+-21'.
 mean_radius_m = 2.4624e7
-# Horizons COMMAND='899' CENTER='@0', X Y Z in km times 1000.
-position_m = [2.513978816984908e12, -3.438170168305322e12, -1.469851595078865e12]
-# Horizons COMMAND='899' CENTER='@0', VX VY VZ in km/s times 1000.
-velocity_m_per_s = [4.47458791838248e3, 2.876584787253288e3, 1.0657731203769e3]
+# Horizons COMMAND='8' (Neptune Barycenter) CENTER='@0', X Y Z in km times 1000:
+# the frame is the system barycenter, so the baked momentum includes the
+# satellites' (docs/data-sources.md).
+position_m = [2.513978721723721e12, -3.438170140316856e12, -1.469851523010959e12]
+# Horizons COMMAND='8' CENTER='@0', VX VY VZ in km/s times 1000.
+velocity_m_per_s = [4.475214621751308e3, 2.877104855637858e3, 1.066200548145841e3]
 # Horizons physical data for target 899: 'Sidereal orbit period = 60189 d'; days times 86400.
 sidereal_orbit_period_s = 5.2003296e9
-# Pole and prime meridian: IAU WGCCRE 2015 report, as BODY899_POLE_RA,
-# BODY899_POLE_DEC, and BODY899_PM in pck00011.tpc, evaluated at J2000.
-pole_ra_deg = 299.333738959
-pole_dec_deg = 42.950359022
-prime_meridian_deg = 249.996007571
-rotation_rate_deg_per_day = 541.1397757
+# Pole, prime meridian, and periodic terms: IAU WGCCRE elements as encoded
+# in NAIF pck00011.tpc (scripts/iau-elements.py), evaluated at the origin.
+pole_ra_deg = [299.36, 0.0]
+pole_dec_deg = [43.46, 0.0]
+prime_meridian_deg = [249.978, 541.1397757, 0.0]
+rotation_terms = [
+  { angle_deg = [357.85, 52.316, 0.0], ra_deg = 0.7, dec_deg = -0.51, pm_deg = -0.48 },
+]
+# NASA NSSDCA Neptune fact sheet: 'J2 (x 10-6) 3411.', 'Equatorial radius (1 bar level) (km) 24,764'.
+j2 = 0.003411
+reference_radius_m = 24764000.0
+# Yoder 1995 (Global Earth Physics, AGU), approximate Clairaut solution: C/(M R^2) = 0.23; the NSSDCA sheet lists none.
+# Converted with the volumetric mean radius: C = f M R^2,
+# A = B = C - J2 M reference_radius^2 (axisymmetric about the pole).
+principal_moments_kg_m2 = [1.407055685481978e+40, 1.407055685481978e+40, 1.428482278774191e+40]
 state = "gas"
-# NASA NSSDCA Neptune fact sheet: 'Black-body temperature (K) 46.6'.
-temperature_k = 46.6
+# Gas: a polytrope of index 1 (docs/model.md). temperature_k is the
+# temperature at the model's 1 bar level: NASA NSSDCA Neptune fact sheet:
+# 'Temperature at 1 bar: 72 K'.
+polytropic_index = 1
+temperature_k = 72.0
 # Bands long to short wavelength (600 to 700 nm, 500 to 600 nm, 400 to
 # 500 nm). Mean of the three is the geometric albedo 0.442 (NASA NSSDCA Neptune fact sheet: 'Geometric albedo 0.442');
 # tint: methane absorbs the red band more strongly than on Uranus, a deeper blue.
 albedo = [0.3, 0.44, 0.586]
 roughness = 0.4
-# Chosen so attenuation * mean density * 0.01 * mean radius >= 10: opaque
-# within one percent of the radius (asserted in tests/data.rs).
-attenuation_m2_per_kg = 1e-07
+# Chosen so the optical depth of the outer one percent of the radius,
+# through the polytropic profile, is at least 10 (asserted in tests/data.rs).
+attenuation_m2_per_kg = 3e-06
 # 8 * mean_radius_m.
 root_extent_m = 1.96992e8
 max_depth = 6
@@ -379,12 +508,33 @@ position_m = [-2.916083841877129e8, -2.667168338540655e8, -7.610248730658794e7]
 velocity_m_per_s = [6.435313889889519e2, -6.660876829565195e2, -3.013257046610932e2]
 # Horizons physical data for target 301: 'Orbit period = 27.321582 d' (sidereal, about the Earth); days times 86400.
 sidereal_orbit_period_s = 2.3605846848e6
-# Pole and prime meridian: IAU WGCCRE 2009 report (the 2015 report does not revise this body's orientation), as BODY301_POLE_RA,
-# BODY301_POLE_DEC, and BODY301_PM in pck00011.tpc, evaluated at J2000.
-pole_ra_deg = 266.857733445
-pole_dec_deg = 65.641102748
-prime_meridian_deg = 41.195263981
-rotation_rate_deg_per_day = 13.17635815
+# Pole, prime meridian, and periodic terms: IAU WGCCRE elements as encoded
+# in NAIF pck00011.tpc (scripts/iau-elements.py), evaluated at the origin.
+pole_ra_deg = [269.9949, 0.0031]
+pole_dec_deg = [66.5392, 0.013]
+prime_meridian_deg = [38.3213, 13.17635815, -1.4e-12]
+rotation_terms = [
+  { angle_deg = [125.045, -1935.5364525, 0.0], ra_deg = -3.8787, dec_deg = 1.5419, pm_deg = 3.561 },
+  { angle_deg = [250.089, -3871.072905, 0.0], ra_deg = -0.1204, dec_deg = 0.0239, pm_deg = 0.1208 },
+  { angle_deg = [260.008, 475263.3328725, 0.0], ra_deg = 0.07, dec_deg = -0.0278, pm_deg = -0.0642 },
+  { angle_deg = [176.625, 487269.629985, 0.0], ra_deg = -0.0172, dec_deg = 0.0068, pm_deg = 0.0158 },
+  { angle_deg = [357.529, 35999.0509575, 0.0], ra_deg = 0.0, dec_deg = 0.0, pm_deg = 0.0252 },
+  { angle_deg = [311.589, 964468.49931, 0.0], ra_deg = 0.0072, dec_deg = -0.0029, pm_deg = -0.0066 },
+  { angle_deg = [134.963, 477198.869325, 0.0], ra_deg = 0.0, dec_deg = 0.0009, pm_deg = -0.0047 },
+  { angle_deg = [276.617, 12006.300765, 0.0], ra_deg = 0.0, dec_deg = 0.0, pm_deg = -0.0046 },
+  { angle_deg = [34.226, 63863.5132425, 0.0], ra_deg = 0.0, dec_deg = 0.0, pm_deg = 0.0028 },
+  { angle_deg = [15.134, -5806.6093575, 0.0], ra_deg = -0.0052, dec_deg = 0.0008, pm_deg = 0.0052 },
+  { angle_deg = [119.743, 131.84064, 0.0], ra_deg = 0.0, dec_deg = 0.0, pm_deg = 0.004 },
+  { angle_deg = [239.961, 6003.1503825, 0.0], ra_deg = 0.0, dec_deg = 0.0, pm_deg = 0.0019 },
+  { angle_deg = [25.053, 473327.79642, 0.0], ra_deg = 0.0043, dec_deg = -0.0009, pm_deg = -0.0044 },
+]
+# NASA NSSDCA Moon fact sheet: 'J2 (x 10-6) 202.7', 'Equatorial radius (km) 1738.1'.
+j2 = 0.0002027
+reference_radius_m = 1738100.0
+# NASA NSSDCA Moon fact sheet: 'Moment of inertia (I/MR2) 0.394'.
+# Converted with the volumetric mean radius: C = f M R^2,
+# A = B = C - J2 M reference_radius^2 (axisymmetric about the pole).
+principal_moments_kg_m2 = [8.733245631995693e+34, 8.733245631995693e+34, 8.737743862766464e+34]
 state = "solid"
 # NASA NSSDCA Moon fact sheet: 'Black-body temperature (K) 270.4'.
 temperature_k = 270.4

@@ -1,23 +1,28 @@
-//! The planetary system: parsed and validated data, the frame registry, and
-//! the per-body matter model.
+//! The planetary system: parsed and validated data, the frame registry at
+//! any origin, and the per-body matter model.
 //!
 //! [`System`] is built from `data/system.toml` (see `docs/data-sources.md`
-//! for where every number comes from). Loading checks the data and builds
-//! the frame registry once through gx-core's validated constructor, so a
-//! loaded [`System`] always yields a registry that passes the rules of
-//! `matter-format.md` section 5 and forms a single frame tree.
+//! for where every number comes from). Loading checks the data, builds the
+//! frame registry at the data epoch once through gx-core's validated
+//! constructor (so the baked states, oblateness, and moments obey the rules
+//! of `matter-format.md` section 5 and form a single frame tree), and
+//! tabulates the polytropic profile of every gas and plasma body.
 //!
-//! Registry (`matter-format.md` section 5.2): one root frame for the system
+//! Registry (`matter-format.md` section 5.2, `space-model.md` section 11
+//! item 1): [`System::registry_at`] integrates the baked state vectors from
+//! the data epoch to the origin with the library integrator
+//! ([`crate::ephemeris`]) and emits one root frame for the system
 //! barycenter, massless and at rest, and one frame per body with its mass,
-//! position and velocity relative to its parent in ICRF axes at the epoch,
-//! orientation relative to its parent's axes, and angular velocity about its
-//! own axes.
+//! position and velocity relative to its parent in ICRF axes at the origin,
+//! orientation relative to its parent's axes and angular velocity about its
+//! own axes from the IAU elements at the origin ([`crate::rotation`]), and
+//! its `j2`, `reference_radius`, and `principal_moments`.
 //!
 //! Matter (`matter-format.md` section 3.3, documented in `docs/model.md`):
-//! each body is a ball of uniform mean density (mass over the volume of the
-//! ball of mean radius) with one state, temperature, three-band albedo,
-//! roughness, and attenuation. Outside the ball is vacuum. Every value is
-//! carried in gx-core unit types.
+//! solid bodies are balls of uniform mean density; gas and plasma bodies are
+//! polytropes matching their mass and mean radius ([`crate::polytrope`]).
+//! Every body has one state, three-band albedo, roughness, and attenuation.
+//! Outside the ball of mean radius is vacuum.
 
 use std::path::Path;
 use std::str::FromStr;
@@ -27,14 +32,21 @@ use core::f64::consts::PI;
 use gx_core::error::ValidationError;
 use gx_core::matter::{Sample, State};
 use gx_core::registry::{Frame, FrameTree, Registry, MAX_DEPTH, ROOT_PARENT};
+use gx_core::timescale::utc_ms_to_tdb_seconds;
 use gx_core::units::{
     Attenuation, CubicMeters, Density, Kelvin, Kilograms, Meters, Quat, Ratio, Seconds, Vec3,
 };
 use serde::Deserialize;
 
-use crate::rotation::RotationElements;
+use crate::ephemeris::{self, EphemerisError};
+use crate::polytrope::{LaneEmden, Profile, ProfileError, Thermal, INDICES};
+use crate::rotation::{PeriodicTerm, RotationElements};
 
-/// Why system data failed to load.
+/// Pressure of the reference level of a gas body's temperature, pascals:
+/// 1 bar (`docs/model.md`, "Temperature").
+pub const REFERENCE_PRESSURE_PA: f64 = 1.0e5;
+
+/// Why system data failed to load, or a registry could not be built.
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
     /// The data file could not be read.
@@ -74,9 +86,20 @@ pub enum ModelError {
         /// The rule it breaks.
         rule: &'static str,
     },
+    /// A body's polytropic profile could not be built.
+    #[error("frame_id {frame_id}: {source}")]
+    Profile {
+        /// The body's frame id.
+        frame_id: u64,
+        /// The underlying error.
+        source: ProfileError,
+    },
     /// The epoch is not finite.
     #[error("epoch tdb_seconds_since_j2000 = {0} is not finite")]
     Epoch(f64),
+    /// The origin is too far from the data epoch to integrate to.
+    #[error("{0}")]
+    Ephemeris(#[from] EphemerisError),
     /// gx-core rejected the registry or the frame tree built from it.
     #[error("registry rejected: {0}")]
     Registry(#[from] ValidationError),
@@ -100,13 +123,18 @@ pub struct RootFrame {
     pub max_depth: u8,
 }
 
-/// What a body is made of, uniformly, in v1 (`docs/model.md`).
+/// What a body is made of (`docs/model.md`).
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Matter {
     /// State of the matter; never vacuum.
     pub state: State,
-    /// Temperature of the matter.
+    /// Temperature: the uniform temperature of a solid body, the 1 bar
+    /// temperature of a gas body, and the outer-layer floor of a plasma
+    /// body.
     pub temperature: Kelvin,
+    /// Temperature at the center of a polytrope scaled to a central
+    /// temperature (the plasma body); `None` otherwise.
+    pub central_temperature: Option<Kelvin>,
     /// Reflectance in the three bands of `gx_core::radiance::BAND_EDGES`,
     /// long to short wavelength.
     pub albedo: [Ratio; 3],
@@ -116,7 +144,17 @@ pub struct Matter {
     pub attenuation: Attenuation,
 }
 
-/// One body: its frame, its state at the epoch, its rotation, and its matter.
+/// How density varies inside a body.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Structure {
+    /// The mean density everywhere inside the ball of mean radius.
+    Uniform,
+    /// A hydrostatic polytrope matching mass and mean radius.
+    Polytrope(Profile),
+}
+
+/// One body: its frame, its state at the data epoch, its rotation, its
+/// gravity field and inertia, and its matter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Body {
     /// Frame id of the body's frame.
@@ -129,18 +167,26 @@ pub struct Body {
     pub mass: Kilograms,
     /// Radius of the ball of the same volume as the body.
     pub mean_radius: Meters,
-    /// Position relative to the parent at the epoch, meters, ICRF axes.
+    /// Position relative to the parent at the data epoch, meters, ICRF axes.
     pub position: Vec3,
-    /// Velocity relative to the parent at the epoch, meters per second,
+    /// Velocity relative to the parent at the data epoch, meters per second,
     /// ICRF axes.
     pub velocity: Vec3,
     /// Published sidereal orbital period about the parent, a check value
     /// that is never compiled.
     pub sidereal_orbit_period: Option<Seconds>,
-    /// IAU rotational elements at the epoch.
+    /// IAU rotational elements.
     pub rotation: RotationElements,
-    /// The uniform matter model.
+    /// Unnormalized second zonal harmonic, dimensionless.
+    pub j2: f64,
+    /// The radius `j2` is quoted against.
+    pub reference_radius: Meters,
+    /// Principal moments of inertia about the body axes, kg m^2.
+    pub principal_moments: Vec3,
+    /// The matter model.
     pub matter: Matter,
+    /// Uniform or polytropic interior.
+    pub structure: Structure,
     /// Edge of the cube of space the body frame's cells divide.
     pub root_extent: Meters,
     /// Deepest cell compiled with non-empty matter in this frame.
@@ -165,8 +211,51 @@ impl Body {
         p_in_frame.length_squared() <= r * r
     }
 
-    /// The sample of the body's matter: mean density and the matter model.
-    pub fn sample(&self) -> Sample {
+    /// Density at distance `r` from the center: the mean density or the
+    /// polytrope's, 0 beyond the mean radius.
+    pub fn density_at_radius(&self, r: f64) -> Density {
+        let radius = self.mean_radius.value();
+        if r > radius {
+            return Density::new(0.0);
+        }
+        match &self.structure {
+            Structure::Uniform => self.mean_density(),
+            Structure::Polytrope(p) => Density::new(p.density_at(r)),
+        }
+    }
+
+    /// Temperature at distance `r` from the center, inside the body.
+    pub fn temperature_at_radius(&self, r: f64) -> Kelvin {
+        match &self.structure {
+            Structure::Uniform => self.matter.temperature,
+            Structure::Polytrope(p) => Kelvin::new(p.temperature_at(r)),
+        }
+    }
+
+    /// The matter sample at a point in the body frame: the body's matter at
+    /// the local density and temperature inside the ball of mean radius
+    /// (vacuum where a polytrope's density reaches 0), [`Sample::VACUUM`]
+    /// outside it.
+    pub fn sample_at(&self, p_in_frame: Vec3) -> Sample {
+        if !self.contains(p_in_frame) {
+            return Sample::VACUUM;
+        }
+        let r = p_in_frame.length();
+        let density = self.density_at_radius(r);
+        if density.value() <= 0.0 {
+            return Sample::VACUUM;
+        }
+        Sample {
+            density,
+            temperature: self.temperature_at_radius(r),
+            ..self.uniform_sample()
+        }
+    }
+
+    /// The body's matter at its mean density and [`Matter::temperature`]:
+    /// every channel but density and temperature is the same everywhere
+    /// inside.
+    pub fn uniform_sample(&self) -> Sample {
         Sample {
             density: self.mean_density(),
             state: self.matter.state,
@@ -174,6 +263,25 @@ impl Body {
             albedo: self.matter.albedo,
             roughness: self.matter.roughness,
             attenuation: self.matter.attenuation,
+        }
+    }
+
+    /// The frame record at the data epoch, orientation relative to the ICRF
+    /// axes (the caller composes it with the parent's).
+    fn frame(&self, epoch: Seconds, orientation: Quat) -> Frame {
+        Frame {
+            frame_id: self.frame_id,
+            parent_frame_id: self.parent_frame_id,
+            root_extent: self.root_extent,
+            max_depth: self.max_depth,
+            mass: self.mass,
+            position: self.position,
+            velocity: self.velocity,
+            orientation,
+            angular_velocity: self.rotation.at(epoch).angular_velocity(),
+            j2: self.j2,
+            reference_radius: self.reference_radius,
+            principal_moments: self.principal_moments,
         }
     }
 }
@@ -185,7 +293,8 @@ pub struct System {
     root: RootFrame,
     /// Sorted by frame id ascending.
     bodies: Vec<Body>,
-    registry: Registry,
+    /// The registry at the data epoch: the baked state vectors.
+    epoch_registry: Registry,
 }
 
 impl System {
@@ -206,7 +315,8 @@ impl System {
             .expect("the bundled system data is valid")
     }
 
-    /// Epoch of every state vector, seconds of TDB since J2000.
+    /// Epoch of every baked state vector (the data epoch), seconds of TDB
+    /// since J2000.
     pub fn epoch(&self) -> Seconds {
         self.epoch
     }
@@ -230,49 +340,77 @@ impl System {
             .map(|i| &self.bodies[i])
     }
 
-    /// The frame registry: the root frame and one frame per body, built
-    /// through gx-core's validated constructor at load time.
-    pub fn registry(&self) -> Registry {
-        self.registry.clone()
+    /// The frame registry at the data epoch: the baked state vectors, with
+    /// orientation and spin from the IAU elements at the data epoch.
+    pub fn epoch_registry(&self) -> &Registry {
+        &self.epoch_registry
+    }
+
+    /// The frame registry at the origin `origin_utc_ms` (UTC milliseconds,
+    /// Unix-style): the baked states integrated to the origin in TDB with
+    /// [`ephemeris::integrate`], orientation and spin from the IAU elements
+    /// at the origin. Its epoch is the origin in TDB seconds since J2000.
+    ///
+    /// Fails if the origin is more than [`ephemeris::MAX_INTERVAL_S`] from
+    /// the data epoch.
+    pub fn registry_at(&self, origin_utc_ms: i64) -> Result<Registry> {
+        let tdb = Seconds::new(utc_ms_to_tdb_seconds(origin_utc_ms));
+        self.registry_at_tdb(tdb)
+    }
+
+    /// [`System::registry_at`] for an origin given in TDB seconds since
+    /// J2000.
+    pub fn registry_at_tdb(&self, tdb: Seconds) -> Result<Registry> {
+        let integrated = ephemeris::integrate(&self.epoch_registry, tdb)?;
+        let mut frames = vec![self.root_frame()];
+        for b in &self.bodies {
+            let state = integrated
+                .state(b.frame_id)
+                .expect("every body is in the integrated tree");
+            let mut f = b.frame(tdb, self.orientation_at(b.frame_id, tdb));
+            f.position = state.position;
+            f.velocity = state.velocity;
+            frames.push(f);
+        }
+        Ok(Registry::new(tdb, frames)?)
     }
 
     /// Orientation of a body frame's axes relative to its parent's axes at
-    /// the epoch: `conj(parent to ICRF) * (body to ICRF)`. The root's axes
-    /// are the ICRF axes. `None` for an unknown id; identity for the root.
-    pub fn orientation(&self, frame_id: u64) -> Option<Quat> {
-        if frame_id == self.root.frame_id {
-            return Some(Quat::identity());
-        }
-        let body = self.body(frame_id)?;
-        let parent = self.icrf_orientation(body.parent_frame_id);
-        Some(normalized(parent.conjugate() * body.rotation.orientation()))
+    /// `tdb`: `conj(parent to ICRF) * (body to ICRF)`, both from the IAU
+    /// elements at `tdb`. The root's axes are the ICRF axes. Identity for
+    /// the root and for an unknown id.
+    pub fn orientation_at(&self, frame_id: u64, tdb: Seconds) -> Quat {
+        let Some(body) = self.body(frame_id) else {
+            return Quat::identity();
+        };
+        let parent = self.icrf_orientation(body.parent_frame_id, tdb);
+        normalized(parent.conjugate() * body.rotation.at(tdb).orientation())
     }
 
-    /// Body axes relative to ICRF axes; identity for the root.
-    fn icrf_orientation(&self, frame_id: u64) -> Quat {
+    /// Body axes relative to ICRF axes at `tdb`; identity for the root.
+    fn icrf_orientation(&self, frame_id: u64, tdb: Seconds) -> Quat {
         self.body(frame_id)
-            .map_or(Quat::identity(), |b| b.rotation.orientation())
+            .map_or(Quat::identity(), |b| b.rotation.at(tdb).orientation())
     }
 
     /// Density at a point in a frame (meters from the frame origin, frame
-    /// axes): the body's mean density inside the ball of mean radius, 0
+    /// axes): the body's local density inside the ball of mean radius, 0
     /// outside it, in the root frame, and in unknown frames.
     pub fn density_at(&self, frame_id: u64, p_in_frame: Vec3) -> Density {
         self.sample_at(frame_id, p_in_frame).density
     }
 
-    /// The matter sample at a point in a frame: the body's [`Body::sample`]
-    /// inside the ball of mean radius, [`Sample::VACUUM`] elsewhere.
+    /// The matter sample at a point in a frame: [`Body::sample_at`] for a
+    /// body frame, [`Sample::VACUUM`] elsewhere.
     pub fn sample_at(&self, frame_id: u64, p_in_frame: Vec3) -> Sample {
         match self.body(frame_id) {
-            Some(body) if body.contains(p_in_frame) => body.sample(),
-            _ => Sample::VACUUM,
+            Some(body) => body.sample_at(p_in_frame),
+            None => Sample::VACUUM,
         }
     }
 
-    /// Builds the registry frames in id order.
-    fn frames(&self) -> Vec<Frame> {
-        let root = Frame {
+    fn root_frame(&self) -> Frame {
+        Frame {
             frame_id: self.root.frame_id,
             parent_frame_id: ROOT_PARENT,
             root_extent: self.root.root_extent,
@@ -282,21 +420,19 @@ impl System {
             velocity: Vec3::zero(),
             orientation: Quat::identity(),
             angular_velocity: Vec3::zero(),
-        };
-        let bodies = self.bodies.iter().map(|b| Frame {
-            frame_id: b.frame_id,
-            parent_frame_id: b.parent_frame_id,
-            root_extent: b.root_extent,
-            max_depth: b.max_depth,
-            mass: b.mass,
-            position: b.position,
-            velocity: b.velocity,
-            orientation: self
-                .orientation(b.frame_id)
-                .expect("every body has an orientation"),
-            angular_velocity: b.rotation.angular_velocity(),
-        });
-        std::iter::once(root).chain(bodies).collect()
+            j2: 0.0,
+            reference_radius: Meters::new(0.0),
+            principal_moments: Vec3::zero(),
+        }
+    }
+
+    /// The registry frames at the data epoch, in id order.
+    fn epoch_frames(&self) -> Vec<Frame> {
+        let bodies = self
+            .bodies
+            .iter()
+            .map(|b| b.frame(self.epoch, self.orientation_at(b.frame_id, self.epoch)));
+        std::iter::once(self.root_frame()).chain(bodies).collect()
     }
 }
 
@@ -344,6 +480,15 @@ struct RawRoot {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawTerm {
+    angle_deg: [f64; 3],
+    ra_deg: f64,
+    dec_deg: f64,
+    pm_deg: f64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawBody {
     frame_id: u64,
     parent_frame_id: u64,
@@ -353,12 +498,18 @@ struct RawBody {
     position_m: [f64; 3],
     velocity_m_per_s: [f64; 3],
     sidereal_orbit_period_s: Option<f64>,
-    pole_ra_deg: f64,
-    pole_dec_deg: f64,
-    prime_meridian_deg: f64,
-    rotation_rate_deg_per_day: f64,
+    pole_ra_deg: [f64; 2],
+    pole_dec_deg: [f64; 2],
+    prime_meridian_deg: [f64; 3],
+    #[serde(default)]
+    rotation_terms: Vec<RawTerm>,
+    j2: f64,
+    reference_radius_m: f64,
+    principal_moments_kg_m2: [f64; 3],
     state: RawState,
+    polytropic_index: Option<u8>,
     temperature_k: f64,
+    central_temperature_k: Option<f64>,
     albedo: [f64; 3],
     roughness: f64,
     attenuation_m2_per_kg: f64,
@@ -431,7 +582,7 @@ impl Checker {
         self.check(field, v, (0.0..=1.0).contains(&v), "is not in 0 to 1")
     }
 
-    fn vector(&self, field: &'static str, v: [f64; 3]) -> Result<()> {
+    fn all_finite(&self, field: &'static str, v: &[f64]) -> Result<()> {
         v.iter().try_for_each(|&c| self.finite(field, c))
     }
 
@@ -471,10 +622,12 @@ fn build(raw: RawFile) -> Result<System> {
         max_depth: raw_root.max_depth,
     };
 
+    // One solution per index, shared by every body of that index.
+    let solutions: Vec<LaneEmden> = INDICES.iter().map(|&n| LaneEmden::solve(n)).collect();
     let mut bodies = raw
         .body
         .into_iter()
-        .map(body_from_raw)
+        .map(|b| body_from_raw(b, &solutions))
         .collect::<Result<Vec<_>>>()?;
     bodies.sort_by_key(|b| b.frame_id);
 
@@ -497,16 +650,16 @@ fn build(raw: RawFile) -> Result<System> {
         epoch: Seconds::new(epoch),
         root,
         bodies,
-        registry: Registry::empty(Seconds::new(epoch))?,
+        epoch_registry: Registry::empty(),
     };
-    let registry = Registry::new(system.epoch, system.frames())?;
+    let registry = Registry::new(system.epoch, system.epoch_frames())?;
     // The single-registry union checks one root, parents, and no cycles.
     FrameTree::from_registries(std::slice::from_ref(&registry))?;
-    system.registry = registry;
+    system.epoch_registry = registry;
     Ok(system)
 }
 
-fn body_from_raw(b: RawBody) -> Result<Body> {
+fn body_from_raw(b: RawBody, solutions: &[LaneEmden]) -> Result<Body> {
     let c = Checker {
         frame_id: b.frame_id,
     };
@@ -518,20 +671,27 @@ fn body_from_raw(b: RawBody) -> Result<Body> {
     )?;
     c.positive("mass_kg", b.mass_kg)?;
     c.positive("mean_radius_m", b.mean_radius_m)?;
-    c.vector("position_m", b.position_m)?;
-    c.vector("velocity_m_per_s", b.velocity_m_per_s)?;
+    c.all_finite("position_m", &b.position_m)?;
+    c.all_finite("velocity_m_per_s", &b.velocity_m_per_s)?;
     if let Some(p) = b.sidereal_orbit_period_s {
         c.positive("sidereal_orbit_period_s", p)?;
     }
-    c.finite("pole_ra_deg", b.pole_ra_deg)?;
+    c.all_finite("pole_ra_deg", &b.pole_ra_deg)?;
+    c.all_finite("pole_dec_deg", &b.pole_dec_deg)?;
     c.check(
         "pole_dec_deg",
-        b.pole_dec_deg,
-        (-90.0..=90.0).contains(&b.pole_dec_deg),
+        b.pole_dec_deg[0],
+        (-90.0..=90.0).contains(&b.pole_dec_deg[0]),
         "is not in -90 to 90",
     )?;
-    c.finite("prime_meridian_deg", b.prime_meridian_deg)?;
-    c.finite("rotation_rate_deg_per_day", b.rotation_rate_deg_per_day)?;
+    c.all_finite("prime_meridian_deg", &b.prime_meridian_deg)?;
+    for t in &b.rotation_terms {
+        c.all_finite("rotation_terms", &t.angle_deg)?;
+        c.all_finite("rotation_terms", &[t.ra_deg, t.dec_deg, t.pm_deg])?;
+    }
+    c.non_negative("j2", b.j2)?;
+    c.non_negative("reference_radius_m", b.reference_radius_m)?;
+    c.all_finite("principal_moments_kg_m2", &b.principal_moments_kg_m2)?;
     c.non_negative("temperature_k", b.temperature_k)?;
     b.albedo.iter().try_for_each(|&a| c.unit("albedo", a))?;
     c.unit("roughness", b.roughness)?;
@@ -544,8 +704,59 @@ fn body_from_raw(b: RawBody) -> Result<Body> {
         "is smaller than the body's mean diameter",
     )?;
     c.depth(b.max_depth)?;
+
+    let state: State = b.state.into();
+    let fluid = matches!(state, State::Gas | State::Plasma);
+    let index = b.polytropic_index.map_or(0.0, f64::from);
+    c.check(
+        "polytropic_index",
+        index,
+        b.polytropic_index.is_some() == fluid,
+        "must be given for gas and plasma bodies and only for them",
+    )?;
+    if let Some(t) = b.central_temperature_k {
+        c.positive("central_temperature_k", t)?;
+        c.check(
+            "central_temperature_k",
+            t,
+            fluid,
+            "is only meaningful for a polytrope",
+        )?;
+    }
+    let structure = match b.polytropic_index {
+        None => Structure::Uniform,
+        Some(n) => {
+            let i = INDICES
+                .iter()
+                .position(|&k| k == n)
+                .ok_or(ModelError::Invalid {
+                    frame_id: b.frame_id,
+                    field: "polytropic_index",
+                    value: f64::from(n),
+                    rule: "is not 1 or 3",
+                })?;
+            let thermal = match b.central_temperature_k {
+                Some(central) => Thermal::Central {
+                    central,
+                    floor: b.temperature_k,
+                },
+                None => Thermal::Reference {
+                    pressure: REFERENCE_PRESSURE_PA,
+                    temperature: b.temperature_k,
+                },
+            };
+            let profile = Profile::new(&solutions[i], b.mass_kg, b.mean_radius_m, thermal)
+                .map_err(|source| ModelError::Profile {
+                    frame_id: b.frame_id,
+                    source,
+                })?;
+            Structure::Polytrope(profile)
+        }
+    };
+
     let [px, py, pz] = b.position_m;
     let [vx, vy, vz] = b.velocity_m_per_s;
+    let [ma, mb, mc] = b.principal_moments_kg_m2;
     Ok(Body {
         frame_id: b.frame_id,
         parent_frame_id: b.parent_frame_id,
@@ -559,15 +770,29 @@ fn body_from_raw(b: RawBody) -> Result<Body> {
             pole_ra_deg: b.pole_ra_deg,
             pole_dec_deg: b.pole_dec_deg,
             prime_meridian_deg: b.prime_meridian_deg,
-            rate_deg_per_day: b.rotation_rate_deg_per_day,
+            terms: b
+                .rotation_terms
+                .iter()
+                .map(|t| PeriodicTerm {
+                    angle_deg: t.angle_deg,
+                    ra_deg: t.ra_deg,
+                    dec_deg: t.dec_deg,
+                    pm_deg: t.pm_deg,
+                })
+                .collect(),
         },
+        j2: b.j2,
+        reference_radius: Meters::new(b.reference_radius_m),
+        principal_moments: Vec3::new(ma, mb, mc),
         matter: Matter {
-            state: b.state.into(),
+            state,
             temperature: Kelvin::new(b.temperature_k),
+            central_temperature: b.central_temperature_k.map(Kelvin::new),
             albedo: b.albedo.map(Ratio::new),
             roughness: Ratio::new(b.roughness),
             attenuation: Attenuation::new(b.attenuation_m2_per_kg),
         },
+        structure,
         root_extent: Meters::new(b.root_extent_m),
         max_depth: b.max_depth,
     })
@@ -596,10 +821,12 @@ mass_kg = 1.0e24
 mean_radius_m = 1.0e6
 position_m = [1.0e11, 0.0, 0.0]
 velocity_m_per_s = [0.0, 3.0e4, 0.0]
-pole_ra_deg = 0.0
-pole_dec_deg = 90.0
-prime_meridian_deg = 0.0
-rotation_rate_deg_per_day = 360.0
+pole_ra_deg = [0.0, 0.0]
+pole_dec_deg = [90.0, 0.0]
+prime_meridian_deg = [0.0, 360.0, 0.0]
+j2 = 1.0e-3
+reference_radius_m = 1.0e6
+principal_moments_kg_m2 = [3.9e35, 3.9e35, 4.0e35]
 state = "solid"
 temperature_k = 250.0
 albedo = [0.3, 0.3, 0.3]
@@ -614,15 +841,41 @@ max_depth = 6
         MINIMAL.replacen(from, to, 1)
     }
 
+    fn gas() -> String {
+        with("state = \"solid\"", "state = \"gas\"\npolytropic_index = 1")
+            .replacen("mass_kg = 1.0e24", "mass_kg = 1.0e27", 1)
+            .replacen("mean_radius_m = 1.0e6", "mean_radius_m = 7.0e7", 1)
+            .replacen("root_extent_m = 8.0e6", "root_extent_m = 5.6e8", 1)
+    }
+
     #[test]
     fn minimal_loads() {
         let s: System = MINIMAL.parse().unwrap();
         assert_eq!(s.bodies().len(), 1);
-        assert_eq!(s.registry().frames().len(), 2);
+        assert_eq!(s.epoch_registry().frames().len(), 2);
         assert!(s.body(0).is_none());
         assert!(s.body(1).is_some());
-        assert_eq!(s.orientation(0), Some(Quat::identity()));
-        assert_eq!(s.orientation(7), None);
+        assert_eq!(s.orientation_at(0, Seconds::new(0.0)), Quat::identity());
+        let f = s.epoch_registry().frames()[1];
+        assert_eq!(f.j2, 1.0e-3);
+        assert_eq!(f.principal_moments, Vec3::new(3.9e35, 3.9e35, 4.0e35));
+        assert_eq!(s.body(1).unwrap().structure, Structure::Uniform);
+    }
+
+    #[test]
+    fn registry_at_the_data_epoch_is_the_baked_one() {
+        let s: System = MINIMAL.parse().unwrap();
+        assert_eq!(
+            &s.registry_at_tdb(Seconds::new(0.0)).unwrap(),
+            s.epoch_registry()
+        );
+        let later = s.registry_at_tdb(Seconds::new(86_400.0)).unwrap();
+        assert_eq!(later.epoch().value(), 86_400.0);
+        assert_ne!(
+            later.frames()[1].position,
+            s.epoch_registry().frames()[1].position
+        );
+        assert!(s.registry_at_tdb(Seconds::new(1.0e12)).is_err());
     }
 
     #[test]
@@ -650,6 +903,20 @@ max_depth = 6
     }
 
     #[test]
+    fn gas_bodies_are_polytropes() {
+        let s: System = gas().parse().unwrap();
+        let b = s.body(1).unwrap();
+        assert!(matches!(b.structure, Structure::Polytrope(_)));
+        let center = s.density_at(1, Vec3::zero()).value();
+        assert!((center / b.mean_density().value() - PI * PI / 3.0).abs() < 1e-6);
+        let edge = s.sample_at(1, Vec3::new(7.0e7, 0.0, 0.0));
+        assert_eq!(edge, Sample::VACUUM);
+        let mid = s.sample_at(1, Vec3::new(3.5e7, 0.0, 0.0));
+        assert_eq!(mid.state, State::Gas);
+        assert!(mid.temperature.value() >= 250.0);
+    }
+
+    #[test]
     fn rejects_bad_data() {
         let cases = [
             with("[root]\nframe_id = 0", "[root]\nframe_id = 1"),
@@ -667,7 +934,7 @@ max_depth = 6
                 "attenuation_m2_per_kg = 0.0",
                 "attenuation_m2_per_kg = -1.0",
             ),
-            with("pole_dec_deg = 90.0", "pole_dec_deg = 91.0"),
+            with("pole_dec_deg = [90.0", "pole_dec_deg = [91.0"),
             with("root_extent_m = 8.0e6", "root_extent_m = 1.0e6"),
             with("max_depth = 6", "max_depth = 32"),
             with("state = \"solid\"", "state = \"vacuum\""),
@@ -675,6 +942,24 @@ max_depth = 6
             with(
                 "tdb_seconds_since_j2000 = 0.0",
                 "tdb_seconds_since_j2000 = nan",
+            ),
+            with("j2 = 1.0e-3", "j2 = -1.0e-3"),
+            // j2 above 0 needs a reference radius (gx-core rule).
+            with("reference_radius_m = 1.0e6", "reference_radius_m = 0.0"),
+            // Moments break the triangle rule.
+            with("[3.9e35, 3.9e35, 4.0e35]", "[1.0e35, 1.0e35, 4.0e35]"),
+            // A solid body has no polytropic index; a gas body needs one.
+            with(
+                "state = \"solid\"",
+                "state = \"solid\"\npolytropic_index = 1",
+            ),
+            with("state = \"solid\"", "state = \"gas\""),
+            gas().replacen("polytropic_index = 1", "polytropic_index = 2", 1),
+            // A gas polytrope with a reference temperature needs index 1.
+            gas().replacen("polytropic_index = 1", "polytropic_index = 3", 1),
+            with(
+                "temperature_k = 250.0",
+                "temperature_k = 250.0\ncentral_temperature_k = 1.0e7",
             ),
         ];
         for (i, case) in cases.iter().enumerate() {
@@ -710,8 +995,6 @@ max_depth = 6
 
     #[test]
     fn parent_cycles_are_rejected() {
-        // Frames 1 and 2 name each other as parents; neither reaches the
-        // root.
         let body = MINIMAL.split("[[body]]").nth(1).unwrap();
         let first = body.replacen("parent_frame_id = 0", "parent_frame_id = 2", 1);
         let second = body.replacen("frame_id = 1", "frame_id = 2", 1).replacen(

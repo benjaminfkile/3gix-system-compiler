@@ -1,43 +1,43 @@
-//! `system-compiler`: command line entry point.
+//! `system-compiler`: the native command line for local work on the module.
 //!
-//! Subcommands:
+//! It calls the same functions the WebAssembly module runs
+//! ([`system_compiler::compile()`]), so what it prints is what the module
+//! returns. Subcommands:
 //!
-//! - `compile`: compile one chunk key to bytes (file or stdout), reporting
-//!   the byte length and SHA-256 on stderr.
+//! - `compile`: compile one chunk key at an origin to bytes (file or
+//!   stdout), reporting the byte length and SHA-256 on stderr.
 //! - `describe`: compile one chunk key, or read bytes from a file with
 //!   `--from-file`, decode them with gx-core, and print a JSON summary of
-//!   the section or the registry. `--container` decodes the file as a hub
-//!   container (`matter-format.md` section 6), the body the hub serves for
-//!   a chunk request.
+//!   the section or the registry.
 //! - `keys`: list every cell key of a frame at one depth whose section is
 //!   not empty, one per line, sorted by `(x, y, z)`.
 //! - `frames`: list the frames of the registry with their compiler-side
 //!   names, for humans.
-//! - `serve`: run as a registered compiler: hold the hub's WebSocket,
-//!   compile the jobs it pushes, and submit the sections (see
-//!   `docs/protocol.md`). Configuration comes from the environment and an
-//!   optional `.env` file.
+//! - `max-depth`: print the layer config's `maxDepth` table
+//!   (`client-compute.md` section 2.2) as JSON, from the registry.
+//! - `conformance`: regenerate the conformance vectors.
 //!
-//! Every subcommand reads the system from `--data`, or from the data baked
-//! into the binary when `--data` is omitted.
+//! Every subcommand except `conformance` reads the system from `--data`, or
+//! from the data baked into the binary when `--data` is omitted. `--origin`
+//! takes UTC milliseconds or `YYYY-MM-DDTHH:MM:SS[.mmm]Z`; it defaults to
+//! the data epoch.
 
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use gx_core::key::{CellKey, ChunkKey};
 use gx_core::matter::{Compression, Section};
 use gx_core::registry::ROOT_PARENT;
+use gx_core::sha256::{sha256, to_hex};
+use gx_core::timescale::{tdb_seconds_to_utc_ms, utc_ms_of_date};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use system_compiler::compile::{compile, non_empty_keys, CompileOptions};
-use system_compiler::hub::{self, Backoff, HubClient, HubConfig, ServeOptions};
 use system_compiler::System;
 
-/// Compiles a planetary system into 3GIX matter.
+/// The system module's native command line.
 #[derive(Parser)]
 #[command(name = "system-compiler", version)]
 struct Cli {
@@ -55,6 +55,10 @@ enum Command {
         /// Chunk key: `registry` or `frameId-depth-x-y-z`.
         #[arg(long)]
         key: String,
+        /// The universe's origin: UTC milliseconds or
+        /// `YYYY-MM-DDTHH:MM:SS[.mmm]Z`. The data epoch when omitted.
+        #[arg(long)]
+        origin: Option<String>,
         /// Output file; stdout when omitted.
         #[arg(long)]
         out: Option<PathBuf>,
@@ -72,13 +76,12 @@ enum Command {
         /// Chunk key: `registry` or `frameId-depth-x-y-z`.
         #[arg(long)]
         key: String,
+        /// The universe's origin, as for `compile`.
+        #[arg(long)]
+        origin: Option<String>,
         /// Describe the bytes in this file instead of compiling the key.
         #[arg(long)]
         from_file: Option<PathBuf>,
-        /// Decode the bytes as a hub container (a section table followed by
-        /// the sections of every layer), as the hub serves a chunk.
-        #[arg(long, requires = "from_file")]
-        container: bool,
     },
     /// List the cell keys at one depth of a frame whose section is not empty.
     Keys {
@@ -92,34 +95,28 @@ enum Command {
         #[arg(long, value_parser = clap::value_parser!(u8).range(0..=31))]
         depth: u8,
     },
-    /// List the registry's frames with their compiler-side names.
+    /// List the registry's frames at an origin with their compiler-side
+    /// names.
     Frames {
         /// System data file; the bundled data when omitted.
         #[arg(long)]
         data: Option<PathBuf>,
+        /// The universe's origin, as for `compile`.
+        #[arg(long)]
+        origin: Option<String>,
     },
-    /// Connect to the hub and compile the jobs it dispatches until
-    /// interrupted. Reads GX_HUB_URL, GX_API_KEY, GX_COMPILER_ID and
-    /// GX_COMPILER_SECRET from the environment or a `.env` file.
-    Serve {
+    /// Print the layer's `maxDepth` table as JSON: every frame id with the
+    /// registry's `max_depth`.
+    MaxDepth {
         /// System data file; the bundled data when omitted.
         #[arg(long)]
         data: Option<PathBuf>,
-        /// Jobs compiled and submitted at once.
-        #[arg(long, default_value_t = hub::DEFAULT_WORKERS as u16,
-              value_parser = clap::value_parser!(u16).range(1..))]
-        workers: u16,
-        /// Exit after the socket closes the first time, once every received
-        /// job has finished.
-        #[arg(long)]
-        once: bool,
-        /// Environment file to load; `.env` in the working directory or a
-        /// parent when omitted. Variables already set are not overridden.
-        #[arg(long)]
-        env_file: Option<PathBuf>,
-        /// Seed of the reconnect jitter generator.
-        #[arg(long, default_value_t = hub::DEFAULT_BACKOFF_SEED)]
-        backoff_seed: u64,
+    },
+    /// Regenerate the conformance vectors into a directory.
+    Conformance {
+        /// Output directory.
+        #[arg(long, default_value = "conformance")]
+        out: PathBuf,
     },
 }
 
@@ -145,16 +142,58 @@ fn parse_key(key: &str) -> anyhow::Result<ChunkKey> {
         .map_err(|e| anyhow::anyhow!("key {key:?}: {e}"))
 }
 
+/// The origin in UTC milliseconds: `--origin` parsed, or the data epoch.
+fn origin(system: &System, text: Option<&str>) -> anyhow::Result<i64> {
+    match text {
+        None => Ok(tdb_seconds_to_utc_ms(system.epoch().value())),
+        Some(t) => parse_origin(t),
+    }
+}
+
+/// Parses UTC milliseconds, or `YYYY-MM-DDTHH:MM:SS[.mmm]Z`.
+fn parse_origin(text: &str) -> anyhow::Result<i64> {
+    if let Ok(ms) = text.parse::<i64>() {
+        return Ok(ms);
+    }
+    let bad = || anyhow::anyhow!("origin {text:?}: not UTC milliseconds or YYYY-MM-DDTHH:MM:SSZ");
+    let t = text.strip_suffix('Z').ok_or_else(bad)?;
+    let (date, time) = t.split_once('T').ok_or_else(bad)?;
+    let num = |s: &str| s.parse::<i64>().map_err(|_| bad());
+    let d: Vec<&str> = date.split('-').collect();
+    let h: Vec<&str> = time.split(':').collect();
+    if d.len() != 3 || h.len() != 3 {
+        return Err(bad());
+    }
+    let (sec, ms) = match h[2].split_once('.') {
+        Some((s, f)) if f.len() == 3 => (num(s)?, num(f)?),
+        Some(_) => return Err(bad()),
+        None => (num(h[2])?, 0),
+    };
+    let (year, month, day) = (num(d[0])?, num(d[1])?, num(d[2])?);
+    let (hour, minute) = (num(h[0])?, num(h[1])?);
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || !(0..24).contains(&hour)
+        || !(0..60).contains(&minute)
+        || !(0..60).contains(&sec)
+    {
+        return Err(bad());
+    }
+    Ok(utc_ms_of_date(year, month, day) + ((hour * 60 + minute) * 60 + sec) * 1000 + ms)
+}
+
 fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Compile {
             data,
             key,
+            origin: o,
             out,
             no_compress,
         } => {
             let system = load(data.as_ref())?;
             let key = parse_key(&key)?;
+            let origin_ms = origin(&system, o.as_deref())?;
             let opts = CompileOptions {
                 compression: if no_compress {
                     Compression::None
@@ -163,8 +202,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 },
                 ..CompileOptions::default()
             };
-            let bytes =
-                compile(&system, &key, &opts).with_context(|| format!("compiling {key}"))?;
+            let bytes = compile(&system, &key, origin_ms, &opts)
+                .with_context(|| format!("compiling {key}"))?;
             match out {
                 Some(path) => std::fs::write(&path, &bytes)
                     .with_context(|| format!("writing {}", path.display()))?,
@@ -174,13 +213,13 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     stdout.flush()?;
                 }
             }
-            eprintln!("{} bytes sha256 {}", bytes.len(), sha256_hex(&bytes));
+            eprintln!("{} bytes sha256 {}", bytes.len(), to_hex(&sha256(&bytes)));
         }
         Command::Describe {
             data,
             key,
+            origin: o,
             from_file,
-            container,
         } => {
             let key = parse_key(&key)?;
             let bytes = match &from_file {
@@ -189,16 +228,15 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 }
                 None => {
                     let system = load(data.as_ref())?;
-                    compile(&system, &key, &CompileOptions::default())
+                    let origin_ms = origin(&system, o.as_deref())?;
+                    compile(&system, &key, origin_ms, &CompileOptions::default())
                         .with_context(|| format!("compiling {key}"))?
                 }
             };
-            let summary = if container {
-                describe_container(&key, &bytes)?
-            } else {
-                describe(&key, &bytes)?
-            };
-            println!("{}", serde_json::to_string_pretty(&summary)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&describe(&key, &bytes)?)?
+            );
         }
         Command::Keys { data, frame, depth } => {
             let system = load(data.as_ref())?;
@@ -207,72 +245,27 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 writeln!(stdout, "{key}")?;
             }
         }
-        Command::Frames { data } => frames(&load(data.as_ref())?),
-        Command::Serve {
-            data,
-            workers,
-            once,
-            env_file,
-            backoff_seed,
-        } => serve(data, usize::from(workers), once, env_file, backoff_seed)?,
+        Command::Frames { data, origin: o } => {
+            let system = load(data.as_ref())?;
+            let origin_ms = origin(&system, o.as_deref())?;
+            frames(&system, origin_ms)?;
+        }
+        Command::MaxDepth { data } => {
+            let system = load(data.as_ref())?;
+            let table: serde_json::Map<String, Value> = system
+                .epoch_registry()
+                .frames()
+                .iter()
+                .map(|f| (f.frame_id.to_string(), json!(f.max_depth)))
+                .collect();
+            println!("{}", Value::Object(table));
+        }
+        Command::Conformance { out } => {
+            system_compiler::conformance::write(&out).map_err(anyhow::Error::msg)?;
+            eprintln!("wrote {}", out.display());
+        }
     }
     Ok(())
-}
-
-/// Runs the `serve` subcommand. Logs go to stderr through `tracing`, at
-/// `info` unless `RUST_LOG` says otherwise.
-fn serve(
-    data: Option<PathBuf>,
-    workers: usize,
-    once: bool,
-    env_file: Option<PathBuf>,
-    backoff_seed: u64,
-) -> anyhow::Result<()> {
-    use std::io::IsTerminal;
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .with_ansi(std::io::stderr().is_terminal())
-        .init();
-
-    hub::load_dotenv(env_file.as_deref())?;
-    let config = HubConfig::from_env()?;
-    let system = Arc::new(load(data.as_ref())?);
-    let client = HubClient::new(config)?.with_seed(backoff_seed);
-    let opts = ServeOptions {
-        workers,
-        once,
-        reconnect: Backoff::standard(backoff_seed),
-        ..ServeOptions::default()
-    };
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("starting the async runtime")?;
-    let shutdown = async {
-        if tokio::signal::ctrl_c().await.is_err() {
-            // No signal handler: run until the process is killed.
-            std::future::pending::<()>().await;
-        }
-    };
-    runtime
-        .block_on(hub::serve(system, client, opts, shutdown))
-        .map_err(|e| {
-            tracing::error!(error = %e, "compiler stopped on an error");
-            anyhow::Error::new(e)
-        })?;
-    Ok(())
-}
-
-/// Lowercase hexadecimal SHA-256 of `bytes`.
-fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }
 
 /// Decodes one section or registry with gx-core and summarizes it as JSON.
@@ -283,38 +276,7 @@ fn describe(key: &ChunkKey, bytes: &[u8]) -> anyhow::Result<Value> {
     };
     summary["key"] = json!(key.to_string());
     summary["bytes"] = json!(bytes.len());
-    summary["sha256"] = json!(sha256_hex(bytes));
-    Ok(summary)
-}
-
-/// Decodes a hub container (`matter-format.md` section 6) with gx-core's
-/// container decoder and summarizes it as JSON: one entry per section in
-/// layer order. For a cell key, `mass_kg` is the sum over the sections; for
-/// the registry, `frame_count` is the total over the registries.
-fn describe_container(key: &ChunkKey, bytes: &[u8]) -> anyhow::Result<Value> {
-    let mut summary = match key {
-        ChunkKey::Registry => {
-            let registries = gx_core::container::decode_registry_chunk(bytes)?;
-            let frame_count: usize = registries.iter().map(|r| r.frames().len()).sum();
-            json!({
-                "section_count": registries.len(),
-                "frame_count": frame_count,
-                "sections": registries.iter().map(registry_json).collect::<Vec<_>>(),
-            })
-        }
-        ChunkKey::Cell(cell) => {
-            let sections = gx_core::container::decode_chunk(cell, bytes)?;
-            let mass: f64 = sections.iter().map(|s| s.mass().value()).sum();
-            json!({
-                "section_count": sections.len(),
-                "mass_kg": mass,
-                "sections": sections.iter().map(|s| section_json(cell, s)).collect::<Vec<_>>(),
-            })
-        }
-    };
-    summary["key"] = json!(key.to_string());
-    summary["bytes"] = json!(bytes.len());
-    summary["sha256"] = json!(sha256_hex(bytes));
+    summary["sha256"] = json!(to_hex(&sha256(bytes)));
     Ok(summary)
 }
 
@@ -325,6 +287,7 @@ fn registry_json(reg: &gx_core::registry::Registry) -> Value {
         .iter()
         .map(|f| {
             let q = f.orientation;
+            let m = f.principal_moments;
             json!({
                 "frame_id": f.frame_id,
                 "parent_frame_id": (f.parent_frame_id != ROOT_PARENT)
@@ -337,6 +300,9 @@ fn registry_json(reg: &gx_core::registry::Registry) -> Value {
                 "orientation_xyzw": [q.x, q.y, q.z, q.w],
                 "angular_velocity_rad_per_s":
                     [f.angular_velocity.x, f.angular_velocity.y, f.angular_velocity.z],
+                "j2": f.j2,
+                "reference_radius_m": f.reference_radius.value(),
+                "principal_moments_kg_m2": [m.x, m.y, m.z],
             })
         })
         .collect();
@@ -367,29 +333,56 @@ fn section_json(cell: &CellKey, s: &Section) -> Value {
     })
 }
 
-/// Prints one line per registry frame, with compiler-side names.
-fn frames(system: &System) {
-    let registry = system.registry();
+/// Prints one line per registry frame at the origin, with compiler-side
+/// names.
+fn frames(system: &System, origin_ms: i64) -> anyhow::Result<()> {
+    let registry = system.registry_at(origin_ms)?;
     println!(
         "epoch {} s TDB since J2000, {} frames",
         registry.epoch().value(),
         registry.frames().len()
     );
     for f in registry.frames() {
-        let name = system
-            .body(f.frame_id)
-            .map_or(system.root().name.as_str(), |b| b.name.as_str());
-        let density = system
-            .body(f.frame_id)
-            .map_or(0.0, |b| b.mean_density().value());
+        let body = system.body(f.frame_id);
+        let name = body.map_or(system.root().name.as_str(), |b| b.name.as_str());
+        let density = body.map_or(0.0, |b| b.mean_density().value());
         println!(
-            "{:>3} {:<26} mass {:.6e} kg  extent {:.4e} m  depth {}  density {:.1} kg/m^3",
+            "{:>3} {:<26} mass {:.6e} kg  distance {:.6e} m  extent {:.4e} m  depth {}  mean density {:.1} kg/m^3",
             f.frame_id,
             name,
             f.mass.value(),
+            f.position.length(),
             f.root_extent.value(),
             f.max_depth,
             density
         );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_origin;
+
+    #[test]
+    fn origins_parse() {
+        assert_eq!(parse_origin("1794614400000").unwrap(), 1_794_614_400_000);
+        assert_eq!(
+            parse_origin("2026-11-14T00:00:00Z").unwrap(),
+            1_794_614_400_000
+        );
+        assert_eq!(
+            parse_origin("2026-11-15T12:00:00.250Z").unwrap(),
+            1_794_744_000_250
+        );
+        assert_eq!(parse_origin("1970-01-01T00:00:00Z").unwrap(), 0);
+        for bad in [
+            "2026-11-14",
+            "2026-13-01T00:00:00Z",
+            "2026-11-14T00:00:00",
+            "x",
+        ] {
+            assert!(parse_origin(bad).is_err(), "{bad}");
+        }
     }
 }

@@ -1,12 +1,13 @@
 //! The chunk compiler: one chunk key in, one validated section out.
 //!
-//! This is the pure function at the heart of the compiler. It implements
+//! This is the pure function at the heart of the module (`client-compute.md`
+//! section 4: one request in, one section out). It implements
 //! `matter-format.md` section 2 (chunk keys), section 3 (matter sections,
 //! including the empty section of 3.4), section 4 (every output is run
 //! through the library validator before it is returned), and section 5 (the
-//! frame registry under the reserved key). The algorithm, the resolution
-//! table, the sub-sampling scheme, and the determinism contract are written
-//! up in `docs/compile.md`.
+//! frame registry under the reserved key, at the request's origin). The
+//! algorithm, the resolution table, the sub-sampling scheme, and the
+//! determinism contract are written up in `docs/compile.md`.
 //!
 //! Determinism: every value is computed in `f64` in a fixed order, loops run
 //! in index order on one thread, and nothing depends on time, randomness, or
@@ -16,23 +17,22 @@ use gx_core::error::ValidationError;
 use gx_core::key::{CellGeometry, CellKey, ChunkKey, MAX_DEPTH};
 use gx_core::matter::{self, Compression, Sample, Samples, Section, MAX_RESOLUTION};
 use gx_core::registry;
-use gx_core::units::{Density, Meters};
+use gx_core::units::{Density, Kelvin, Meters};
 
-use crate::model::{Body, System};
+use crate::model::{Body, ModelError, Structure, System};
 
 /// Sub-sampling points per axis inside one sample's sub-cube. The fraction
 /// of a sub-cube inside the body is the share of its
 /// `SUBSAMPLES^3` stratified points that fall inside the ball.
 pub const SUBSAMPLES: u32 = 4;
 
-/// The default resolution table: 8 at depth 0, 32 at depth 1, 16 at depth
+/// The default resolution table: 32 at depth 0, 32 at depth 1, 16 at depth
 /// 2, 32 at depths 3 and 4, 48 at depth 5, and 64 (the format's maximum)
 /// from depth 6 on.
 ///
-/// Depth 1 has more samples per axis than depth 2 because a body spans only
-/// a quarter of each depth 1 cell along each axis: at 16 the ball is 8
-/// samples across and the summed mass is 0.58 percent high; at 32 it is 16
-/// samples across, as at depth 2, and the error is 0.086 percent.
+/// Depths 0 and 1 have more samples per axis than depth 2 because a body
+/// spans only an eighth and a quarter of those cells along each axis: at 32
+/// the ball is 8 and 16 samples across.
 pub const DEFAULT_RESOLUTION_BY_DEPTH: [u8; 32] = default_resolution_table();
 
 const fn default_resolution_table() -> [u8; 32] {
@@ -42,7 +42,7 @@ const fn default_resolution_table() -> [u8; 32] {
         MAX_RESOLUTION
     };
     let mut t = [top; 32];
-    t[0] = 8;
+    t[0] = 32;
     t[1] = 32;
     t[2] = 16;
     t[3] = 32;
@@ -73,6 +73,9 @@ impl Default for CompileOptions {
 /// Why a chunk key could not be compiled.
 #[derive(Debug, thiserror::Error)]
 pub enum CompileError {
+    /// The registry could not be built at the request's origin.
+    #[error("registry: {0}")]
+    Registry(#[from] ModelError),
     /// The cell key names a frame the system does not declare.
     #[error("frame_id {0} is not declared by this system")]
     UnknownFrame(u64),
@@ -84,7 +87,9 @@ pub enum CompileError {
 
 /// Compiles one chunk key to the bytes of its section.
 ///
-/// - `registry`: the system's frame registry (`matter-format.md` section 5).
+/// - `registry`: the system's frame registry at the origin `origin_utc_ms`
+///   (UTC milliseconds), [`System::registry_at`] (`matter-format.md`
+///   section 5). The origin is the only input that changes it.
 /// - A cell of an undeclared frame: [`CompileError::UnknownFrame`].
 /// - A cell of the root frame: an empty section; the root holds no matter.
 /// - A cell of a body frame: an empty section if the cell cube does not
@@ -94,13 +99,15 @@ pub enum CompileError {
 ///
 /// The bytes are checked with `gx_core::validate::validate` under the key's
 /// canonical string before they are returned.
+/// Matter does not change with time, so cell sections ignore the origin.
 pub fn compile(
     system: &System,
     key: &ChunkKey,
+    origin_utc_ms: i64,
     opts: &CompileOptions,
 ) -> Result<Vec<u8>, CompileError> {
     let bytes = match key {
-        ChunkKey::Registry => registry::encode(&system.registry()),
+        ChunkKey::Registry => registry::encode(&system.registry_at(origin_utc_ms)?),
         ChunkKey::Cell(cell) => matter::encode(&section(system, cell, opts)?, opts.compression),
     };
     gx_core::validate::validate(&key.to_string(), &bytes)?;
@@ -161,14 +168,22 @@ pub fn intersects(body: &Body, g: &CellGeometry) -> bool {
 
 /// Samples the body's matter on the `n^3` grid of a cell.
 ///
-/// The fraction of each sub-cube inside the ball is estimated from a fixed
-/// stratified lattice: the cell is divided into `(SUBSAMPLES * n)^3` equal
-/// boxes and each box contributes its center point, so every sub-cube holds
-/// `SUBSAMPLES^3` points at the offsets `(i + 0.5) / SUBSAMPLES` of its
-/// edge. A point at distance `d` from the center is inside when
-/// `d^2 <= r^2`, the same rule as [`Body::contains`]. Density is
-/// `fraction * mean_density`; the other channels are the body's for a
-/// sample with any matter and zero for vacuum.
+/// Each sample averages its sub-cube over a fixed stratified lattice: the
+/// cell is divided into `(SUBSAMPLES * n)^3` equal boxes and each box
+/// contributes its center point, so every sub-cube holds `SUBSAMPLES^3`
+/// points at the offsets `(i + 0.5) / SUBSAMPLES` of its edge. A point at
+/// distance `d` from the center is inside when `d^2 <= r^2`, the same rule
+/// as [`Body::contains`].
+///
+/// - Uniform body: density is `inside / SUBSAMPLES^3 * mean_density`.
+/// - Polytrope: each inside point contributes the profile's `theta^n` and
+///   `theta^n T` at `s = d^2 / r^2` (linear interpolation in the table, no
+///   square root); density is `rho_c * sum(theta^n) / SUBSAMPLES^3` and
+///   temperature the density-weighted mean `sum(theta^n T) / sum(theta^n)`.
+///
+/// A sample with density above 0 takes the body's state, albedo,
+/// roughness, and attenuation; one with density 0 is vacuum with every
+/// channel 0.
 pub fn sample_cell(body: &Body, g: &CellGeometry, n: u8) -> Samples {
     let m = SUBSAMPLES as usize * usize::from(n);
     let step = g.edge.value() / m as f64;
@@ -190,26 +205,54 @@ pub fn sample_cell(body: &Body, g: &CellGeometry, n: u8) -> Samples {
     let r2 = r * r;
     let s = SUBSAMPLES as usize;
     let total = f64::from(SUBSAMPLES * SUBSAMPLES * SUBSAMPLES);
-    let full = body.sample();
+    let full = body.uniform_sample();
     let mean = full.density.value();
     Samples::from_fn(n, |x, y, z| {
         let (x0, y0, z0) = (x as usize * s, y as usize * s, z as usize * s);
-        let mut inside = 0u32;
-        for &qz in &sz[z0..z0 + s] {
-            for &qy in &sy[y0..y0 + s] {
-                for &qx in &sx[x0..x0 + s] {
-                    if qx + qy + qz <= r2 {
-                        inside += 1;
+        match &body.structure {
+            Structure::Uniform => {
+                let mut inside = 0u32;
+                for &qz in &sz[z0..z0 + s] {
+                    for &qy in &sy[y0..y0 + s] {
+                        for &qx in &sx[x0..x0 + s] {
+                            if qx + qy + qz <= r2 {
+                                inside += 1;
+                            }
+                        }
+                    }
+                }
+                if inside == 0 {
+                    Sample::VACUUM
+                } else {
+                    Sample {
+                        density: Density::new(f64::from(inside) / total * mean),
+                        ..full
                     }
                 }
             }
-        }
-        if inside == 0 {
-            Sample::VACUUM
-        } else {
-            Sample {
-                density: Density::new(f64::from(inside) / total * mean),
-                ..full
+            Structure::Polytrope(profile) => {
+                let (mut phi, mut phi_t) = (0.0f64, 0.0f64);
+                for &qz in &sz[z0..z0 + s] {
+                    for &qy in &sy[y0..y0 + s] {
+                        for &qx in &sx[x0..x0 + s] {
+                            let d2 = qx + qy + qz;
+                            if d2 <= r2 {
+                                let u = d2 / r2;
+                                phi += profile.density_factor(u);
+                                phi_t += profile.weighted_temperature(u);
+                            }
+                        }
+                    }
+                }
+                if phi <= 0.0 {
+                    Sample::VACUUM
+                } else {
+                    Sample {
+                        density: Density::new(profile.central_density() * phi / total),
+                        temperature: Kelvin::new(phi_t / phi),
+                        ..full
+                    }
+                }
             }
         }
     })
@@ -279,7 +322,7 @@ mod tests {
     #[test]
     fn default_table() {
         let t = DEFAULT_RESOLUTION_BY_DEPTH;
-        assert_eq!(&t[..7], &[8, 32, 16, 32, 32, 48, 64]);
+        assert_eq!(&t[..7], &[32, 32, 16, 32, 32, 48, 64]);
         assert!(t[7..].iter().all(|&n| n == 64));
     }
 }

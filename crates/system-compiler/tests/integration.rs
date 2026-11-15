@@ -32,7 +32,7 @@ fn one_year_of_orbits_stays_within_bounds() {
         })
         .collect();
 
-    let tree = FrameTree::from_registries(&[s.registry()]).unwrap();
+    let tree = FrameTree::from_registries(std::slice::from_ref(s.epoch_registry())).unwrap();
     let mut frames = FrameSystem::from_tree(tree);
     let step = 3600.0;
     let end = 365.25 * DAY;

@@ -3,36 +3,35 @@ name = "system-compiler"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
-description = "Compiles a planetary system into 3GIX matter: a frame registry and per-body density fields."
+description = "The system module: compiles a planetary system into 3GIX matter, a frame registry at the origin and per-body density fields."
 
 [lib]
 name = "system_compiler"
 path = "src/lib.rs"
+# `cdylib` is the WebAssembly module; `rlib` is what the CLI and the tests
+# link.
+crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "system-compiler"
 path = "src/main.rs"
 
 [dependencies]
-gx-core = { git = "https://github.com/benjaminfkile/3gix-core", branch = "grunt" }
+# Without default features: the library's own C ABI and wasm-bindgen
+# exports would bring imports into the module (core docs/modules.md).
+gx-core = { git = "https://github.com/benjaminfkile/3gix-core", branch = "grunt", default-features = false }
+gx-module-guest = { git = "https://github.com/benjaminfkile/3gix-core", branch = "grunt" }
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
-anyhow = "1"
+toml = { version = "0.8", default-features = false, features = ["parse"] }
 thiserror = "2"
-sha2 = "0.11.0"
+
+# The native CLI only. The module build (`--lib --target
+# wasm32-unknown-unknown`) never compiles these.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+anyhow = "1"
 clap = { version = "4.6.7", features = ["derive"] }
 serde_json = "1.0.151"
-tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "time", "signal", "sync", "net"] }
-tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
-futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-dotenvy = "0.15.7"
-url = "2.5.8"
-reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
-rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-bytes = "1.12.1"
 
 [dev-dependencies]
-axum = { version = "0.8.9", features = ["ws"] }
-tokio = { version = "1.53.2", features = ["process", "io-util"] }
+toml = "0.8"
+serde_json = "1.0.151"
