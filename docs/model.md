@@ -209,22 +209,27 @@ A sample's `temperature` is the mean of everything it holds; light leaves
 only from about one optical depth below its outer side. A coarse sample at
 the edge of the Sun holds matter at hundreds of thousands of kelvin but
 shows only its photosphere. So each sample also carries the radiating
-temperature (`src/polytrope.rs`, "Radiating temperature"): the radiance
-`G(r)` that leaves radius `r` outward from the matter below it is
-tabulated from the depth of optical depth 60 to the surface by the formal
-solution of the transfer equation along the radius; a sample spanning radii
-`r_in` to `r_out` (its sub-cube's nearest and farthest points from the
-center) with optical thickness `dtau` sends out
+temperature (`src/polytrope.rs`, "Radiating temperature"). A sample
+radiates the same in every direction, so it must carry the mean radiance of
+the outward flux, `G(r) = F(r) / pi`, not the brighter radiance straight up
+the radius (the disc center, without limb darkening). `G` is tabulated
+from the depth of optical depth 60 to the surface by the formal solution of
+the transfer equation along 32 directions, `G = 2 integral mu I(mu) dmu`;
+a sample spanning radii `r_in` to `r_out` (its sub-cube's nearest and
+farthest points from the center) with optical thickness `dtau` sends out
 `(G(r_out) - e^-dtau G(r_in)) / (1 - e^-dtau)`, and its radiating
 temperature is the blackbody temperature of that radiance summed over the
 three bands. Uniform bodies have it equal to their temperature.
 
 Measured through the library's emission law on the depth-0 sections
-(`tests/light.rs`): the Sun sends out 2.0 times `4 pi R^2 pi B(T_eff)` in
-the visible bands, the atmosphere's 1.2 times the depth-0 grid's coarse
-outline (eight samples across the ball cover more than its disc); a whole
-Sun section at 64 samples across gives 1.72. No planet sends out any
-light at 1000 K or above.
+(`tests/light.rs`): the Sun sends out 1.45 times `4 pi R^2 pi B(T_eff)` in
+the visible bands, the gray atmosphere's 1.2 times the depth-0 grid's
+coarse outline (eight samples across the ball cover more than its disc);
+a whole Sun section at 16, 32, and 64 samples across gives 1.35, 1.29, and
+1.25. The 1.2 is the gray Eddington atmosphere's: its deeper, hotter
+layers show more in the visible bands than `T_eff^4` says, where the real
+Sun's line blanketing takes some back. No planet sends out any light at
+1000 K or above.
 
 ## Deliberately not modeled
 

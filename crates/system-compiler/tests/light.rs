@@ -30,10 +30,10 @@ fn only_the_star_shines_and_about_as_bright_as_its_photosphere() {
         if b.frame_id == SUN {
             let p: f64 = e.unwrap().band_power.iter().sum();
             let ratio = p / sphere_power(b.mean_radius.value(), 5772.0);
-            // Measured 2.0: the gray atmosphere's own 1.2 in these bands
+            // Measured 1.45: the gray atmosphere's own 1.2 in these bands
             // (below) times the depth-0 grid's coarse outline (8 samples
             // across the ball).
-            assert!(ratio > 1.0 && ratio < 2.5, "ratio {ratio}");
+            assert!(ratio > 1.0 && ratio < 1.6, "ratio {ratio}");
         } else {
             assert_eq!(e, None, "{}", b.name);
         }
@@ -60,7 +60,8 @@ fn finer_grids_approach_the_atmosphere() {
             .iter()
             .sum();
         let ratio = p / sphere_power(r, 5772.0);
-        assert!(ratio < last && ratio > 1.0, "n {n}: {ratio}");
+        // Measured 1.35, 1.29, 1.25: toward the atmosphere's 1.2.
+        assert!(ratio < last && ratio > 1.0 && ratio < 1.4, "n {n}: {ratio}");
         last = ratio;
     }
 }

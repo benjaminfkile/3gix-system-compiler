@@ -17,14 +17,14 @@
     "03-plasma-d0": {
       "key": "1-0-0-0-0",
       "origin_utc_ms": 1794614400000,
-      "sha256": "668f4d2a467b46dfac0047c4c2f4bdded6206a93facc3793401f3bb2d2f67b44",
+      "sha256": "2b2edd9be1023b40ca72a761165b87f8330a630007e3c48be47967e237eef291",
       "sources": [],
       "why": "the plasma polytrope whole, depth 0"
     },
     "04-plasma-d2": {
       "key": "1-2-1-1-1",
       "origin_utc_ms": 1794614400000,
-      "sha256": "8d8f3cb4ef262b8d845ed6443ab05e7c7d37f4bb02f0f71fde3c312e92bd40dc",
+      "sha256": "f3f383d0de388d33eff44b63deac57c41a2a966d04bea60954f4e9383076a7d2",
       "sources": [],
       "why": "the plasma core octant, depth 2"
     },
@@ -45,7 +45,7 @@
     "07-gas-d2": {
       "key": "6-2-1-2-1",
       "origin_utc_ms": 1794614400000,
-      "sha256": "8bd75d3100c0aa1ac2746695b66b0c4461dd481bf17c2f3e25cccbdcbf257384",
+      "sha256": "c6eeff4810d50a234b95775857e5686283083f4340020b0dc2da3015a5b7c9ea",
       "sources": [],
       "why": "a gas polytrope octant, depth 2"
     },

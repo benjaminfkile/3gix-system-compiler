@@ -52,20 +52,27 @@
 //! # Radiating temperature
 //!
 //! A sample's radiating temperature (`matter-format.md` section 3.3) is
-//! what its matter sends out of its outer side. For a spherical body the
-//! radiance leaving radius `r` outward, from everything below it, is
+//! what its matter sends out of its outer side. A sample radiates the same
+//! way in every direction (`gx_core::emission`), so what it must carry is
+//! the mean radiance of the outward flux, not the radiance straight up
+//! (which is brighter: the disc center, without limb darkening). For a
+//! spherical body the radiance leaving radius `r` at angle `acos mu` to the
+//! radius, from everything below it, is
 //!
 //! ```text
-//! G(r) = integral from tau(r) to infinity of B(T(tau')) e^-(tau' - tau(r)) dtau',
+//! I(r, mu) = integral from tau(r) to infinity of B(T(tau')) e^-(tau' - tau(r)) / mu dtau' / mu,
 //! ```
 //!
-//! the formal solution of the transfer equation along the radius, `B` the
-//! blackbody radiance summed over the three bands. [`Profile::set_radiation`]
-//! tabulates `G` on [`ATMOSPHERE_STEPS`] intervals uniform in `r` from the
-//! depth where the optical depth from the surface reaches [`DEEP_TAU`] up to
-//! the surface, stepping the recurrence
-//! `G(r + dr) = G(r) e^-dtau + B(T_mid) (1 - e^-dtau)` outward; below that
-//! depth `G(r) = B(T(r))`. A sample whose matter spans radii `r_in` to
+//! the formal solution of the transfer equation, `B` the blackbody radiance
+//! summed over the three bands, and the flux mean is
+//! `G(r) = F(r) / pi = 2 integral from 0 to 1 of mu I(r, mu) dmu`.
+//! [`Profile::set_radiation`] tabulates `G` on [`ATMOSPHERE_STEPS`]
+//! intervals uniform in `r` from the depth where the optical depth from the
+//! surface reaches [`DEEP_TAU`] up to the surface, stepping the recurrence
+//! `I(r + dr, mu) = I(r, mu) e^-dtau/mu + B(T_mid) (1 - e^-dtau/mu)` outward
+//! for [`DIRECTIONS`] values of `mu` (midpoints of equal intervals) and
+//! summing `G = 2 sum(mu I) / DIRECTIONS`; below that depth
+//! `G(r) = B(T(r))`. A sample whose matter spans radii `r_in` to
 //! `r_out` with optical thickness `dtau` between them sends out
 //! `(G(r_out) - e^-dtau G(r_in)) / (1 - e^-dtau)`, and its radiating
 //! temperature is the temperature whose summed band radiance equals that
@@ -103,6 +110,9 @@ pub const PHOTOSPHERE_TAU: f64 = 2.0 / 3.0;
 
 /// Intervals of the radiation table from [`DEEP_TAU`] to the surface.
 pub const ATMOSPHERE_STEPS: usize = 4096;
+
+/// Directions (values of `mu`) of the radiation table's flux integral.
+pub const DIRECTIONS: usize = 32;
 
 /// Optical depth below which the radiation table starts: deeper matter
 /// sends out its own blackbody radiance, `e^-DEEP_TAU` of what lies below
@@ -560,15 +570,28 @@ impl Profile {
         for k in (0..ATMOSPHERE_STEPS).rev() {
             column[k] = column[k + 1] + simpson(&rho, r_at(k), r_at(k + 1), COLUMN_STEPS);
         }
+        let mu: Vec<f64> = (0..DIRECTIONS)
+            .map(|i| (i as f64 + 0.5) / DIRECTIONS as f64)
+            .collect();
+        let flux_mean = |intensity: &[f64]| -> f64 {
+            let mut acc = 0.0;
+            for (m, i) in mu.iter().zip(intensity) {
+                acc += m * i;
+            }
+            2.0 * acc / DIRECTIONS as f64
+        };
         let mut outgoing = Vec::with_capacity(ATMOSPHERE_STEPS + 1);
-        let mut g = radiance_sum(self.temperature_at(r0));
-        outgoing.push(g);
+        let mut intensity = vec![radiance_sum(self.temperature_at(r0)); DIRECTIONS];
+        outgoing.push(flux_mean(&intensity));
         for k in 0..ATMOSPHERE_STEPS {
             let dtau = kappa * (column[k] - column[k + 1]);
-            let through = exp(-dtau);
             let mid = 0.5 * (r_at(k) + r_at(k + 1));
-            g = g * through + radiance_sum(self.temperature_at(mid)) * (1.0 - through);
-            outgoing.push(g);
+            let b = radiance_sum(self.temperature_at(mid));
+            for (i, m) in intensity.iter_mut().zip(&mu) {
+                let through = exp(-dtau / m);
+                *i = *i * through + b * (1.0 - through);
+            }
+            outgoing.push(flux_mean(&intensity));
         }
         self.radiation = Some(Radiation {
             kappa,
