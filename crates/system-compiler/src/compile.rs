@@ -110,6 +110,9 @@ pub fn compile(
     let bytes = match key {
         ChunkKey::Registry => registry::encode(&system.registry_at(origin_utc_ms)?),
         ChunkKey::Cell(cell) => matter::encode(&section(system, cell, opts)?, opts.compression),
+        // The system module gives every body coarse matter only; it emits
+        // no surface tiles (`matter-format.md` 10.4).
+        ChunkKey::Surface(tile) => gx_core::surface::encode_empty(tile),
     };
     gx_core::validate::validate(&key.to_string(), &bytes)?;
     Ok(bytes)

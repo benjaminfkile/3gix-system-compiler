@@ -273,6 +273,10 @@ fn describe(key: &ChunkKey, bytes: &[u8]) -> anyhow::Result<Value> {
     let mut summary = match key {
         ChunkKey::Registry => registry_json(&gx_core::registry::decode(bytes)?),
         ChunkKey::Cell(cell) => section_json(cell, &gx_core::matter::decode(cell, bytes)?),
+        ChunkKey::Surface(tile) => {
+            gx_core::surface::decode(tile, bytes)?;
+            json!({ "surface": "empty" })
+        }
     };
     summary["key"] = json!(key.to_string());
     summary["bytes"] = json!(bytes.len());

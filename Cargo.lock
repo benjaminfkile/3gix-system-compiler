@@ -148,7 +148,7 @@ dependencies = [
 [[package]]
 name = "gx-core"
 version = "0.1.0"
-source = "git+https://github.com/benjaminfkile/3gix-core?branch=grunt#04d370ff96ca822308e3b9a56bf156657fc6963c"
+source = "git+https://github.com/benjaminfkile/3gix-core?branch=grunt#b6abf99ff2157ea3450c6f38f498e46e6f7d5579"
 dependencies = [
  "zstd",
 ]
@@ -156,7 +156,7 @@ dependencies = [
 [[package]]
 name = "gx-module-guest"
 version = "0.1.0"
-source = "git+https://github.com/benjaminfkile/3gix-core?branch=grunt#04d370ff96ca822308e3b9a56bf156657fc6963c"
+source = "git+https://github.com/benjaminfkile/3gix-core?branch=grunt#b6abf99ff2157ea3450c6f38f498e46e6f7d5579"
 dependencies = [
  "gx-core",
 ]
