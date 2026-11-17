@@ -17,13 +17,14 @@ use gx_core::error::ValidationError;
 use gx_core::key::{CellGeometry, CellKey, ChunkKey, MAX_DEPTH};
 use gx_core::matter::{self, Compression, Sample, Samples, Section, MAX_RESOLUTION};
 use gx_core::registry;
-use gx_core::units::{Density, Kelvin, Meters};
+use gx_core::units::{Density, Kelvin, Meters, Ratio};
 
 use crate::model::{Body, ModelError, Structure, System};
 
 /// Sub-sampling points per axis inside one sample's sub-cube. The fraction
 /// of a sub-cube inside the body is the share of its
-/// `SUBSAMPLES^3` stratified points that fall inside the ball.
+/// `SUBSAMPLES^3` stratified points that fall inside the ball; it scales
+/// a uniform body's density and is every sample's occupancy.
 pub const SUBSAMPLES: u32 = 4;
 
 /// The default resolution table: 32 at depth 0, 32 at depth 1, 16 at depth
@@ -185,9 +186,15 @@ pub fn intersects(body: &Body, g: &CellGeometry) -> bool {
 ///   ([`crate::polytrope::Profile::radiating_temperature`]).
 /// - Uniform body: the radiating temperature is the temperature.
 ///
+/// Occupancy (`matter-format.md` section 3.3) is the share of the
+/// `SUBSAMPLES^3` points inside the ball, the body's outer boundary, for
+/// every state alike: for a gas or plasma body the ball is the outer
+/// boundary of the gas. Its 0.5 level therefore sits where the boundary
+/// cuts the sub-cubes, whatever the density profile does there.
+///
 /// A sample with density above 0 takes the body's state, albedo,
 /// roughness, and attenuation; one with density 0 is vacuum with every
-/// channel 0.
+/// channel 0, occupancy included.
 pub fn sample_cell(body: &Body, g: &CellGeometry, n: u8) -> Samples {
     let m = SUBSAMPLES as usize * usize::from(n);
     let step = g.edge.value() / m as f64;
@@ -228,19 +235,23 @@ pub fn sample_cell(body: &Body, g: &CellGeometry, n: u8) -> Samples {
                 if inside == 0 {
                     Sample::VACUUM
                 } else {
+                    let share = f64::from(inside) / total;
                     Sample {
-                        density: Density::new(f64::from(inside) / total * mean),
+                        density: Density::new(share * mean),
+                        occupancy: Ratio::new(share),
                         ..full
                     }
                 }
             }
             Structure::Polytrope(profile) => {
                 let (mut phi, mut phi_t) = (0.0f64, 0.0f64);
+                let mut inside = 0u32;
                 for &qz in &sz[z0..z0 + s] {
                     for &qy in &sy[y0..y0 + s] {
                         for &qx in &sx[x0..x0 + s] {
                             let d2 = qx + qy + qz;
                             if d2 <= r2 {
+                                inside += 1;
                                 let u = d2 / r2;
                                 phi += profile.density_factor(u);
                                 phi_t += profile.weighted_temperature(u);
@@ -258,6 +269,7 @@ pub fn sample_cell(body: &Body, g: &CellGeometry, n: u8) -> Samples {
                         radiating_temperature: Kelvin::new(
                             profile.radiating_temperature(r_in, r_out),
                         ),
+                        occupancy: Ratio::new(f64::from(inside) / total),
                         ..full
                     }
                 }

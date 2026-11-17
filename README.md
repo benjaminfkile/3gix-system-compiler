@@ -12,6 +12,7 @@ One request in (`client-compute.md` section 4: chunk key, origin in UTC millisec
 
 - **`registry`**: the frame registry at the origin. The origin is converted to TDB with the core `timescale`; the state vectors baked at J2000 in `data/system.toml` are integrated to it with the core relativistic integrator (first post-Newtonian gravity, oblateness, torques) at a fixed 1800 s step; orientation and spin are the IAU rotational elements evaluated at the origin. The registry's epoch is the origin in TDB. One root frame for the system barycenter and one frame per body.
 - **A cell key**: the matter section of that cell. Solid bodies are uniform balls. Gas and plasma bodies are hydrostatic polytropes matching mass and mean radius (index 1 for the gas bodies, index 3 for the plasma body), with temperatures from the polytropic relation. Cells outside a body, deeper than the frame's `max_depth`, or in the root frame are empty sections.
+- **Occupancy** (`matter-format.md` section 3.3, format version 3): every sample carries the share of its sub-cube inside the body's outer boundary, the ball of mean radius. It is counted from the same stratified points (4 per axis, 64 per sample) that give the mean density: occupancy is the fraction of them inside. Gas and plasma bodies get it the same way, as the share of the sub-cube inside the outer boundary of the gas. A sample wholly inside has occupancy 1 whatever its density; a vacuum sample has 0. The level set `occupancy = 0.5` of the solid and fluid samples is therefore where the body's boundary is: `tests/occupancy.rs` measures it within a hundredth to three hundredths of a sample spacing of the radius at depths 2, 4, and 6 (`docs/compile.md`, "Occupancy").
 - It reads no source tiles (`gx_sources` returns none) and ignores the span.
 - Every section is validated with the core library before it is returned.
 - Deterministic: identical bytes for identical requests, natively and under Node, on every machine. Pinned by the conformance vectors in `conformance/`.
@@ -76,6 +77,7 @@ crates/system-compiler/    library crate `system_compiler` (cdylib: the
   tests/compile.rs         mass conservation, polytrope edges, exact empty
                            cells, key listing
   tests/conformance.rs     checked-in vectors match the module's output
+  tests/occupancy.rs       the occupancy 0.5 level sits on the boundary
   tests/integration.rs     one year of orbits with the core integrator
   tests/describe.rs        the CLI against the library
 docs/model.md              how a body becomes frames and matter

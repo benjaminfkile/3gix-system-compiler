@@ -17,70 +17,70 @@
     "03-plasma-d0": {
       "key": "1-0-0-0-0",
       "origin_utc_ms": 1794614400000,
-      "sha256": "2b2edd9be1023b40ca72a761165b87f8330a630007e3c48be47967e237eef291",
+      "sha256": "4335858190a9b1cbd3f8a76a1f331e9c19083203c869cfbe9f5d6e7a94fa3803",
       "sources": [],
       "why": "the plasma polytrope whole, depth 0"
     },
     "04-plasma-d2": {
       "key": "1-2-1-1-1",
       "origin_utc_ms": 1794614400000,
-      "sha256": "f3f383d0de388d33eff44b63deac57c41a2a966d04bea60954f4e9383076a7d2",
+      "sha256": "270163524515e0f6112442b1f4598b84093808974fdca22fbe3e14edeec73d0d",
       "sources": [],
       "why": "the plasma core octant, depth 2"
     },
     "05-solid-d1": {
       "key": "4-1-1-1-1",
       "origin_utc_ms": 1794614400000,
-      "sha256": "2118c825e5dbecebefe79dd4b58c98261e6531536215ea77c2266ada416bad97",
+      "sha256": "fdbdaa5fa2f4bb280e0fa392cce2d00b6ee9935d5709249523510f7f3dafc278",
       "sources": [],
       "why": "a uniform solid ball octant, depth 1"
     },
     "06-solid-d3": {
       "key": "4-3-3-4-3",
       "origin_utc_ms": 1794744000000,
-      "sha256": "6e015416f526535ab5946750ec1bf4891a7d13a0810bf78baa0021d57df7aafb",
+      "sha256": "c68b634d41da9d6fc5bd69f9a9e2f78b562d7a7d83101766d44236ad724296c9",
       "sources": [],
       "why": "a uniform solid surface cell, depth 3"
     },
     "07-gas-d2": {
       "key": "6-2-1-2-1",
       "origin_utc_ms": 1794614400000,
-      "sha256": "c6eeff4810d50a234b95775857e5686283083f4340020b0dc2da3015a5b7c9ea",
+      "sha256": "e72cdca4132133b19f011c70852504357c7c629be797aba8bbd023cc93c3543c",
       "sources": [],
       "why": "a gas polytrope octant, depth 2"
     },
     "08-gas-d4": {
       "key": "7-4-7-8-7",
       "origin_utc_ms": 1794614400000,
-      "sha256": "04eb4cdea4a1cc5f4b089890a804132ce34ee952f96cef0ad5c6f33a79a79848",
+      "sha256": "f46830cc8c74d320eadb170b7e3cd0ddf115030d6d809aafd557d1c5b71ee631",
       "sources": [],
       "why": "a gas polytrope interior cell, depth 4"
     },
     "09-solid-d5": {
       "key": "10-5-15-16-15",
       "origin_utc_ms": 1794614400000,
-      "sha256": "d3eefac6f7929195ebc4c0f74789fea32ac2c9c15755ed05c438c83f4d6a002d",
+      "sha256": "7001042df3dbb1d6ef8363f09262c05896c491c6bc9b00c727cba4547751e395",
       "sources": [],
       "why": "the orbiting solid, depth 5"
     },
     "10-gas-d6": {
       "key": "9-6-31-32-32",
       "origin_utc_ms": 1794614400000,
-      "sha256": "2a78dc4ab9583c7af54baf2ef6de490cfe868d12cd3ac079312be2be4d5d96c2",
+      "sha256": "dc43c72886a1d6dd5bfdd2166d5adb5a12789ab0e7f729ab5d7f7865b280166e",
       "sources": [],
       "why": "a gas polytrope center cell, depth 6"
     },
     "11-root": {
       "key": "0-0-0-0-0",
       "origin_utc_ms": 1794614400000,
-      "sha256": "33f4aefad424c701987e3a1580be9d43756ae1ddddc5957d921690f165939506",
+      "sha256": "39b129b35cf3b502ca54829d7f24b2c37889b73ecae2cc2aa36c7b58f1ee3ccb",
       "sources": [],
       "why": "the root frame, which holds no matter"
     },
     "12-empty": {
       "key": "3-2-0-0-0",
       "origin_utc_ms": 1794614400000,
-      "sha256": "bf3c7e6e990f9101c74354b94b44bf0a3a1ee72e9aba8f548429cda35695e113",
+      "sha256": "84eac63f2c3729684e36a4ff53a1a3a695ab137a3e09c6ce5326bb1462fb68fb",
       "sources": [],
       "why": "a far corner cell that is empty"
     }
