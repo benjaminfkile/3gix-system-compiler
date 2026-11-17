@@ -253,9 +253,9 @@ impl Body {
         }
     }
 
-    /// The body's matter at its mean density and [`Matter::temperature`]:
-    /// every channel but density and temperature is the same everywhere
-    /// inside.
+    /// The body's matter at its mean density and [`Matter::temperature`],
+    /// filling its whole sub-cube (occupancy 1): every channel but density,
+    /// temperature, and occupancy is the same everywhere inside.
     pub fn uniform_sample(&self) -> Sample {
         Sample {
             density: self.mean_density(),
@@ -265,6 +265,7 @@ impl Body {
             roughness: self.matter.roughness,
             attenuation: self.matter.attenuation,
             radiating_temperature: self.matter.temperature,
+            occupancy: Ratio::new(1.0),
         }
     }
 
