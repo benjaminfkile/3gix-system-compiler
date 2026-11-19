@@ -9,7 +9,10 @@
 //!
 //! - [`SystemModule`]: the module. For the `registry` key it returns the
 //!   frame registry at the request's origin; for a cell key, the matter
-//!   section of that cell. It reads no source tiles. Built for
+//!   section of that cell; for a frame key `frame-{id}`, the frame record
+//!   (`matter-format.md` section 11, `client-compute.md` section 10.2), or
+//!   the empty record for a frame it does not declare. It stays ABI
+//!   version 1. It reads no source tiles. Built for
 //!   `wasm32-unknown-unknown`, [`gx_module_guest::gx_module!`] turns it into
 //!   the `gx_sources` and `gx_compile` exports.
 //! - [`compile`](mod@compile): one chunk key in, one validated,

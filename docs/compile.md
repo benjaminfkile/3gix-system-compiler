@@ -62,7 +62,7 @@ Mass conservation (`tests/compile.rs`): the summed mass of the non-empty depth 1
 
 ## Conformance policy
 
-`conformance/` holds twelve request vectors (`NAME.request.bin`, `NAME.tiles.bin`, `NAME.sha256`) and `index.json` saying what each covers: the registry at two origins (2026-11-14T00:00:00Z and 2026-11-15T12:00:00Z), whole and partial cells of the plasma body, solid bodies, and gas bodies at depths 0 to 6, a root cell, and an empty cell. Each hash is a promise about the bytes every client computes and uploads.
+`conformance/` holds fifteen request vectors (`NAME.request.bin`, `NAME.tiles.bin`, `NAME.sha256`) and `index.json` saying what each covers: the registry at two origins (2026-11-14T00:00:00Z and 2026-11-15T12:00:00Z), whole and partial cells of the plasma body, solid bodies, and gas bodies at depths 0 to 6, a root cell, an empty cell, and three frame keys at origin 0 as the hub sends them: the record of the orbiting solid (which has moments and a parent that is not the root), the root's record, and the empty record of an undeclared frame. Each hash is a promise about the bytes every client computes and uploads.
 
 - `tests/conformance.rs` regenerates the vectors natively through the module's own entry point and requires every checked-in file to match byte for byte.
 - `scripts/ci.sh` builds the WebAssembly module and runs the core library's determinism harness on it: every vector through the native module host (wasmtime) and through Node's WebAssembly, both required to give the checked-in hash.
