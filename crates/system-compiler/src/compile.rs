@@ -5,7 +5,9 @@
 //! `matter-format.md` section 2 (chunk keys), section 3 (matter sections,
 //! including the empty section of 3.4), section 4 (every output is run
 //! through the library validator before it is returned), and section 5 (the
-//! frame registry under the reserved key, at the request's origin). The
+//! frame registry under the reserved key, at the request's origin), and
+//! section 11 (frame records under `frame-{id}`, `client-compute.md`
+//! sections 4 and 10.2). The
 //! algorithm, the resolution table, the sub-sampling scheme, and the
 //! determinism contract are written up in `docs/compile.md`.
 //!
@@ -14,6 +16,7 @@
 //! hash iteration order. Identical inputs give identical bytes.
 
 use gx_core::error::ValidationError;
+use gx_core::frame_record;
 use gx_core::key::{CellGeometry, CellKey, ChunkKey, MAX_DEPTH};
 use gx_core::matter::{self, Compression, Sample, Samples, Section, MAX_RESOLUTION};
 use gx_core::registry;
@@ -91,6 +94,10 @@ pub enum CompileError {
 /// - `registry`: the system's frame registry at the origin `origin_utc_ms`
 ///   (UTC milliseconds), [`System::registry_at`] (`matter-format.md`
 ///   section 5). The origin is the only input that changes it.
+/// - `frame-{id}`: the frame record of a declared frame, the empty record
+///   of any other ([`System::frame_record`], `matter-format.md` section
+///   11). It does not depend on the origin; the hub sends origin 0.
+/// - A surface tile key: the empty tile.
 /// - A cell of an undeclared frame: [`CompileError::UnknownFrame`].
 /// - A cell of the root frame: an empty section; the root holds no matter.
 /// - A cell of a body frame: an empty section if the cell cube does not
@@ -113,6 +120,8 @@ pub fn compile(
         // The system module gives every body coarse matter only; it emits
         // no surface tiles (`matter-format.md` 10.4).
         ChunkKey::Surface(tile) => gx_core::surface::encode_empty(tile),
+        // Origin independent: the record carries only constant fields.
+        ChunkKey::Frame(frame_id) => frame_record::encode(&system.frame_record(*frame_id)),
     };
     gx_core::validate::validate(&key.to_string(), &bytes)?;
     Ok(bytes)

@@ -41,9 +41,11 @@ pub struct Vector {
     pub why: &'static str,
 }
 
-/// The twelve vectors: the registry at two origins and cells of several
-/// bodies at several depths.
-pub const VECTORS: [Vector; 12] = [
+/// The fifteen vectors: the registry at two origins, cells of several
+/// bodies at several depths, and three frame keys (`matter-format.md`
+/// section 11) at origin 0, as the hub sends them: a body with moments, the
+/// root, and a frame the system does not declare.
+pub const VECTORS: [Vector; 15] = [
     v(
         "01-registry-a",
         ORIGIN_A_UTC_MS,
@@ -115,6 +117,24 @@ pub const VECTORS: [Vector; 12] = [
         ORIGIN_A_UTC_MS,
         "3-2-0-0-0",
         "a far corner cell that is empty",
+    ),
+    v(
+        "13-frame-body",
+        0,
+        "frame-10",
+        "the frame record of the orbiting solid, with moments",
+    ),
+    v(
+        "14-frame-root",
+        0,
+        "frame-0",
+        "the frame record of the root",
+    ),
+    v(
+        "15-frame-undeclared",
+        0,
+        "frame-42",
+        "a frame the system does not declare: the empty record",
     ),
 ];
 

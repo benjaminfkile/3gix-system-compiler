@@ -30,6 +30,7 @@ use std::str::FromStr;
 use core::f64::consts::PI;
 
 use gx_core::error::ValidationError;
+use gx_core::frame_record::FrameRecord;
 use gx_core::matter::{Sample, State};
 use gx_core::registry::{Frame, FrameTree, Registry, MAX_DEPTH, ROOT_PARENT};
 use gx_core::timescale::utc_ms_to_tdb_seconds;
@@ -347,6 +348,22 @@ impl System {
     /// orientation and spin from the IAU elements at the data epoch.
     pub fn epoch_registry(&self) -> &Registry {
         &self.epoch_registry
+    }
+
+    /// The frame record of `frame_id` (`matter-format.md` section 11):
+    /// [`FrameRecord::from_registry_frame`] of the frame of the data epoch
+    /// registry, built by the same code as every registry's frame, so the
+    /// record agrees with the registry at any origin by construction. The
+    /// empty record (section 11.2) for a frame the system does not declare.
+    pub fn frame_record(&self, frame_id: u64) -> FrameRecord {
+        self.epoch_registry
+            .frames()
+            .iter()
+            .find(|f| f.frame_id == frame_id)
+            .map_or(
+                FrameRecord::empty(frame_id),
+                FrameRecord::from_registry_frame,
+            )
     }
 
     /// The frame registry at the origin `origin_utc_ms` (UTC milliseconds,

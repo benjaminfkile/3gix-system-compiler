@@ -277,11 +277,29 @@ fn describe(key: &ChunkKey, bytes: &[u8]) -> anyhow::Result<Value> {
             gx_core::surface::decode(tile, bytes)?;
             json!({ "surface": "empty" })
         }
+        ChunkKey::Frame(_) => frame_record_json(&gx_core::frame_record::decode(bytes)?),
     };
     summary["key"] = json!(key.to_string());
     summary["bytes"] = json!(bytes.len());
     summary["sha256"] = json!(to_hex(&sha256(bytes)));
     Ok(summary)
+}
+
+/// JSON summary of one decoded frame record.
+fn frame_record_json(r: &gx_core::frame_record::FrameRecord) -> Value {
+    let m = r.principal_moments;
+    json!({
+        "empty": r.empty,
+        "frame_id": r.frame_id,
+        "parent_frame_id": (!r.empty && r.parent_frame_id != ROOT_PARENT)
+            .then_some(r.parent_frame_id),
+        "root_extent_m": r.root_extent.value(),
+        "max_depth": r.max_depth,
+        "mass_kg": r.mass.value(),
+        "j2": r.j2,
+        "reference_radius_m": r.reference_radius.value(),
+        "principal_moments_kg_m2": [m.x, m.y, m.z],
+    })
 }
 
 /// JSON summary of one decoded registry: epoch and every frame.

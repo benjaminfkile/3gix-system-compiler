@@ -83,6 +83,27 @@
       "sha256": "84eac63f2c3729684e36a4ff53a1a3a695ab137a3e09c6ce5326bb1462fb68fb",
       "sources": [],
       "why": "a far corner cell that is empty"
+    },
+    "13-frame-body": {
+      "key": "frame-10",
+      "origin_utc_ms": 0,
+      "sha256": "7974872fa89a1ebb8c9b927430d58ad175f02fb100a951983bc99b3449fe9f47",
+      "sources": [],
+      "why": "the frame record of the orbiting solid, with moments"
+    },
+    "14-frame-root": {
+      "key": "frame-0",
+      "origin_utc_ms": 0,
+      "sha256": "31d30b2c73c8a7b9a5ac7a89664d65bc5eaf613209c673793f08cff4c0e3a445",
+      "sources": [],
+      "why": "the frame record of the root"
+    },
+    "15-frame-undeclared": {
+      "key": "frame-42",
+      "origin_utc_ms": 0,
+      "sha256": "156f143866f5499945cb30fcc3b45a58aada6f1cbcec7b1ec692bf526a4c39fa",
+      "sources": [],
+      "why": "a frame the system does not declare: the empty record"
     }
   }
 }

@@ -40,8 +40,8 @@ fn checked_in_vectors_match() {
 }
 
 #[test]
-fn twelve_vectors_with_two_registries() {
-    assert_eq!(VECTORS.len(), 12);
+fn fifteen_vectors_with_two_registries() {
+    assert_eq!(VECTORS.len(), 15);
     let registries: Vec<i64> = VECTORS
         .iter()
         .filter(|v| v.key == "registry")
@@ -49,6 +49,19 @@ fn twelve_vectors_with_two_registries() {
         .collect();
     assert_eq!(registries.len(), 2);
     assert_ne!(registries[0], registries[1]);
+}
+
+#[test]
+fn frame_vectors_have_origin_zero() {
+    let frames: Vec<&str> = VECTORS
+        .iter()
+        .filter(|v| v.key.starts_with("frame-"))
+        .map(|v| {
+            assert_eq!(v.origin_utc_ms, 0, "{}", v.name);
+            v.key
+        })
+        .collect();
+    assert_eq!(frames, ["frame-10", "frame-0", "frame-42"]);
 }
 
 #[test]
